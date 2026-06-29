@@ -25,6 +25,9 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # Temporary: drop once the home-assistant/brands PR for enova_power
+          # is merged (brand assets are also required for core).
+          ignore: brands
 
   tests:
     if: ${{ github.server_url == 'https://github.com' }}

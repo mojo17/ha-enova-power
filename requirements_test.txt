@@ -1,3 +1,7 @@
 # Pulls in the matching Home Assistant + pytest plugins for testing custom
 # integrations. Pin to the HA version you target before submitting to core.
 pytest-homeassistant-custom-component
+
+# The integration's runtime dependency (manifest requirements are not
+# auto-installed in CI), kept in sync with manifest.json.
+enovapower==0.5.1
