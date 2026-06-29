@@ -18,9 +18,10 @@ async def async_get_config_entry_diagnostics(
     """Return diagnostics for a config entry (credentials redacted)."""
     coordinator = entry.runtime_data
     latest = coordinator.data
+    # meter ids are account-linked identifiers; report shape, not values.
     return {
-        "meter_id": coordinator.client.meter_id,
-        "meter_ids": coordinator.client.meter_ids,
+        "meter_count": len(coordinator.client.meter_ids),
+        "has_meter_id": coordinator.client.meter_id is not None,
         "latest_reading_date": latest.date.isoformat() if latest else None,
         "latest_total_kwh": latest.total if latest else None,
         "config_keys_present": sorted(k for k in entry.data if k not in TO_REDACT),

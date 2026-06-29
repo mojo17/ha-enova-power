@@ -36,7 +36,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -
     except EnovaNetworkError as err:
         raise ConfigEntryNotReady(f"Cannot reach Enova Power: {err}") from err
 
-    LOGGER.debug("Logged in; meters=%s", client.meter_ids)
+    LOGGER.debug("Logged in; %d meter(s) found", len(client.meter_ids))
+
+    # Every statistic/entity is keyed on the meter id; never set up on None.
+    if not client.meter_id:
+        raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
 
     coordinator = EnovaPowerCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
