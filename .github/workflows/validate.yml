@@ -32,11 +32,16 @@ jobs:
   tests:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
+    # Non-blocking for now: standing up the full HA test environment in CI is
+    # fragile (HA/numpy pins can force source builds). Validate locally in a HA
+    # dev container and pin pytest-homeassistant-custom-component to your target
+    # HA version, then drop continue-on-error to make this gating again.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip setuptools wheel
-      - run: pip install -r requirements_test.txt
+      - run: pip install --prefer-binary -r requirements_test.txt
       - run: pytest --cov=custom_components.enova_power --cov-report=term-missing
