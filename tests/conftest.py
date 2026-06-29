@@ -19,7 +19,7 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 def mock_client():
     """Patch AsyncEnovaClient in the config flow with a logged-in mock."""
     with patch(
-        "custom_components.enova_power.config_flow.AsyncEnovaClient", autospec=True
+        "custom_components.enova_power.config_flow.AsyncEnovaClient"
     ) as mock_cls:
         client = mock_cls.return_value
         client.login = AsyncMock()

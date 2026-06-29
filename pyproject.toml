@@ -1,0 +1,5 @@
+# Test configuration only — the integration ships as a custom_components
+# directory, not a pip-installable package, so there's no [build-system].
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
