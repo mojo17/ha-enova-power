@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Enova Power",
+        "description": "Sign in with your Enova Power My Account credentials. This is an unofficial integration, not affiliated with Enova Power Corp.",
+        "data": {
+          "username": "Username (email)",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Enova Power",
+        "description": "Your Enova Power credentials need updating.",
+        "data": {
+          "username": "Username (email)",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication",
+      "cannot_connect": "Failed to connect",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "account_mismatch": "The credentials are for a different Enova Power account"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "latest_daily_consumption": {
+        "name": "Latest daily consumption"
+      },
+      "latest_reading_date": {
+        "name": "Latest reading date"
+      }
+    }
+  }
+}

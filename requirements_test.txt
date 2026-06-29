@@ -1,0 +1,3 @@
+# Pulls in the matching Home Assistant + pytest plugins for testing custom
+# integrations. Pin to the HA version you target before submitting to core.
+pytest-homeassistant-custom-component

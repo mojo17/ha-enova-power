@@ -1,0 +1,13 @@
+{
+  "domain": "enova_power",
+  "name": "Enova Power",
+  "codeowners": ["@mojo17"],
+  "config_flow": true,
+  "documentation": "https://github.com/mojo17/ha-enova-power",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/mojo17/ha-enova-power/issues",
+  "loggers": ["enovapower"],
+  "requirements": ["enovapower==0.5.1"],
+  "version": "0.1.0"
+}
