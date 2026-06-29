@@ -1,9 +1,9 @@
 {
   "domain": "enova_power",
   "name": "Enova Power",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@mojo17"],
   "config_flow": true,
-  "dependencies": ["recorder"],
   "documentation": "https://github.com/mojo17/ha-enova-power",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
