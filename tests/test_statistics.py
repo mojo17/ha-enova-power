@@ -7,9 +7,12 @@ from datetime import date, datetime, timezone
 from enovapower import UsageReading
 
 from custom_components.enova_power.statistics import (
+    TOU_BUCKETS,
     _build_statistics,
+    _daily_points,
     _flatten_points,
     _normalize_start,
+    bucket_statistic_id,
     consumption_statistic_id,
 )
 
@@ -22,6 +25,22 @@ def _reading(day: date, **hours: float) -> UsageReading:
 
 async def test_statistic_id() -> None:
     assert consumption_statistic_id("111111") == "enova_power:energy_consumption_111111"
+
+
+async def test_bucket_statistic_ids() -> None:
+    assert set(TOU_BUCKETS) == {"on_peak", "mid_peak", "off_peak"}
+    assert bucket_statistic_id("111111", "on_peak") == "enova_power:energy_on_peak_111111"
+
+
+async def test_daily_points_uses_day_start_and_attr() -> None:
+    reading = _reading(date(2026, 1, 2), h01=1.0)
+    reading.total_on_peak = 5.0
+    points = _daily_points([reading], "total_on_peak")
+    assert len(points) == 1
+    start, value = points[0]
+    assert value == 5.0
+    # day start = h01 = 2026-01-02 00:00 EST = 05:00 UTC
+    assert start == datetime(2026, 1, 2, 5, tzinfo=timezone.utc)
 
 
 async def test_normalize_start_float() -> None:

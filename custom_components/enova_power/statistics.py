@@ -31,8 +31,22 @@ from .const import DOMAIN, LOGGER
 
 
 def consumption_statistic_id(meter_id: str) -> str:
-    """Return the external statistic_id for a meter's consumption."""
+    """Return the external statistic_id for a meter's total consumption."""
     return f"{DOMAIN}:energy_consumption_{meter_id}"
+
+
+# Daily Time-of-Use buckets the portal classifies in every reading. Keyed by
+# statistic suffix → UsageReading attribute.
+TOU_BUCKETS: dict[str, str] = {
+    "on_peak": "total_on_peak",
+    "mid_peak": "total_mid_peak",
+    "off_peak": "total_off_peak",
+}
+
+
+def bucket_statistic_id(meter_id: str, bucket: str) -> str:
+    """Return the external statistic_id for a meter's TOU bucket (e.g. on_peak)."""
+    return f"{DOMAIN}:energy_{bucket}_{meter_id}"
 
 
 def _normalize_start(value: object) -> datetime | None:
@@ -60,6 +74,23 @@ def _flatten_points(
         for start, kwh in reading.intervals()
         if kwh is not None
     )
+
+
+def _daily_points(
+    readings: Iterable[UsageReading], attr: str
+) -> list[tuple[datetime, float]]:
+    """Sorted ``(day_start, value)`` points for a daily TOU bucket attribute.
+
+    The day start is the reading's first hourly interval (``h01``), which the
+    library already maps to a UTC-aware, hour-aligned timestamp.
+    """
+    points: list[tuple[datetime, float]] = []
+    for reading in readings:
+        intervals = reading.intervals()
+        if not intervals:
+            continue
+        points.append((intervals[0][0], getattr(reading, attr)))
+    return sorted(points)
 
 
 def _build_statistics(
@@ -99,12 +130,13 @@ async def async_last_statistic_start(
     return _normalize_start(row.get("start")) if row else None
 
 
-async def async_import_statistics(
-    hass: HomeAssistant, meter_id: str, readings: Iterable[UsageReading]
+async def _async_import_series(
+    hass: HomeAssistant,
+    statistic_id: str,
+    name: str,
+    points: list[tuple[datetime, float]],
 ) -> int:
-    """Import hourly consumption into external statistics; return points added."""
-    statistic_id = consumption_statistic_id(meter_id)
-    points = _flatten_points(readings)
+    """Import one forward-only kWh statistic series; return points added."""
     if not points:
         return 0
 
@@ -119,7 +151,7 @@ async def async_import_statistics(
     metadata = StatisticMetaData(
         has_mean=False,
         has_sum=True,
-        name=f"Enova Power consumption ({meter_id})",
+        name=name,
         source=DOMAIN,
         statistic_id=statistic_id,
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
@@ -127,3 +159,31 @@ async def async_import_statistics(
     LOGGER.debug("Adding %d statistics points to %s", len(stats), statistic_id)
     async_add_external_statistics(hass, metadata, stats)
     return len(stats)
+
+
+async def async_import_statistics(
+    hass: HomeAssistant, meter_id: str, readings: Iterable[UsageReading]
+) -> int:
+    """Import a meter's consumption plus per-day TOU buckets; return total points.
+
+    Total consumption is hourly (from ``intervals()``); the on/mid/off-peak
+    buckets are daily (the portal's own classification in each reading).
+    """
+    readings = list(readings)
+
+    added = await _async_import_series(
+        hass,
+        consumption_statistic_id(meter_id),
+        f"Enova Power consumption ({meter_id})",
+        _flatten_points(readings),
+    )
+
+    for bucket, attr in TOU_BUCKETS.items():
+        await _async_import_series(
+            hass,
+            bucket_statistic_id(meter_id, bucket),
+            f"Enova Power {bucket.replace('_', '-')} ({meter_id})",
+            _daily_points(readings, attr),
+        )
+
+    return added
