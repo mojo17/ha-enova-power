@@ -4,8 +4,26 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 DOMAIN = "enova_power"
+
+# Ontario runs the TOU/ULO schedule in local (DST-observing) clock time.
+TIME_ZONE = ZoneInfo("America/Toronto")
+
+# Time-of-Use / ULO periods (also the ENUM sensor options).
+PERIOD_OFF_PEAK = "off_peak"
+PERIOD_MID_PEAK = "mid_peak"
+PERIOD_ON_PEAK = "on_peak"
+PERIOD_ULO_OVERNIGHT = "ulo_overnight"
+PERIOD_TIERED = "tiered"
+PERIODS = [
+    PERIOD_OFF_PEAK,
+    PERIOD_MID_PEAK,
+    PERIOD_ON_PEAK,
+    PERIOD_ULO_OVERNIGHT,
+    PERIOD_TIERED,
+]
 
 LOGGER = logging.getLogger(__package__)
 

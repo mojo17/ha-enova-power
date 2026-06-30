@@ -76,7 +76,7 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
         self.client = client
 
     @property
-    def _plan(self) -> str:
+    def plan(self) -> str:
         """The configured pricing plan (options override config data)."""
         entry = self.config_entry
         return entry.options.get(CONF_PLAN) or entry.data.get(CONF_PLAN, DEFAULT_PLAN)
@@ -119,7 +119,7 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
         Historical cost is estimated using the current rates (a documented
         approximation); ULO/Tiered cost is not implemented yet.
         """
-        if self._plan != PLAN_TOU:
+        if self.plan != PLAN_TOU:
             return None
         try:
             rates = await self.client.download_tariff(today - timedelta(days=30), today)

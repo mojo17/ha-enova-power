@@ -20,14 +20,17 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
 )
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import EnovaPowerConfigEntry
-from .const import DOMAIN
+from .const import DOMAIN, PERIODS, TIME_ZONE
 from .coordinator import EnovaPowerCoordinator
+from .schedule import current_period
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,11 +64,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up Enova Power sensors from a config entry (one set per meter)."""
     coordinator = entry.runtime_data
-    async_add_entities(
+    entities: list[SensorEntity] = [
         EnovaPowerSensor(coordinator, meter_id, description)
         for meter_id in coordinator.client.meter_ids
         for description in SENSORS
-    )
+    ]
+    # One account-wide sensor for the live pricing period.
+    entities.append(EnovaCurrentPeriodSensor(entry.entry_id, coordinator.plan))
+    async_add_entities(entities)
 
 
 class EnovaPowerSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
@@ -99,3 +105,44 @@ class EnovaPowerSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
         if reading is None:
             return None
         return self.entity_description.value_fn(reading)
+
+
+class EnovaCurrentPeriodSensor(SensorEntity):
+    """The live Time-of-Use / ULO pricing period (account-wide).
+
+    Computed from the Ontario OEB schedule, not from the lagged usage data, and
+    refreshed on the hour (period boundaries are whole hours). Useful for
+    "run when cheap" automations.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "current_period"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = PERIODS
+
+    def __init__(self, entry_id: str, plan: str) -> None:
+        """Initialize the period sensor."""
+        self._plan = plan
+        self._attr_unique_id = f"{entry_id}_current_period"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry_id}_account")},
+            manufacturer="Enova Power",
+            name="Enova Power",
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return the active pricing period right now."""
+        return current_period(dt_util.now(TIME_ZONE), self._plan)
+
+    async def async_added_to_hass(self) -> None:
+        """Refresh on the hour, when periods can change."""
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._handle_tick, minute=0, second=0
+            )
+        )
+
+    @callback
+    def _handle_tick(self, now: datetime) -> None:
+        self.async_write_ha_state()

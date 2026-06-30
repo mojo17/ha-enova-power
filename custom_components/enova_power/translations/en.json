@@ -48,6 +48,16 @@
       },
       "latest_reading_date": {
         "name": "Latest reading date"
+      },
+      "current_period": {
+        "name": "Current pricing period",
+        "state": {
+          "off_peak": "Off-peak",
+          "mid_peak": "Mid-peak",
+          "on_peak": "On-peak",
+          "ulo_overnight": "ULO overnight",
+          "tiered": "Tiered"
+        }
       }
     }
   }
