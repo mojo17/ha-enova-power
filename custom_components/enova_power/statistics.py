@@ -49,6 +49,34 @@ def bucket_statistic_id(meter_id: str, bucket: str) -> str:
     return f"{DOMAIN}:energy_{bucket}_{meter_id}"
 
 
+def cost_statistic_id(meter_id: str) -> str:
+    """Return the external statistic_id for a meter's estimated cost."""
+    return f"{DOMAIN}:energy_cost_{meter_id}"
+
+
+# Time-of-Use bucket → the rate name the library scrapes from the tariff table.
+TOU_PRICE_NAMES: dict[str, str] = {
+    "on_peak": "TOU On-peak",
+    "mid_peak": "TOU Mid-peak",
+    "off_peak": "TOU Off-peak",
+}
+
+
+def tou_prices(rates: Iterable) -> dict[str, float] | None:
+    """Extract {bucket: cents_per_kWh} for the Time-of-Use plan, or None.
+
+    Returns None unless all three TOU buckets are present, so cost is only
+    computed when the full price set is available.
+    """
+    by_name = {r.name: r.price for r in rates if r.plan == "Time-of-Use"}
+    prices = {
+        bucket: by_name[name]
+        for bucket, name in TOU_PRICE_NAMES.items()
+        if name in by_name
+    }
+    return prices if len(prices) == len(TOU_PRICE_NAMES) else None
+
+
 def _normalize_start(value: object) -> datetime | None:
     """Normalize a ``get_last_statistics`` 'start' to a UTC-aware datetime.
 
@@ -90,6 +118,28 @@ def _daily_points(
         if not intervals:
             continue
         points.append((intervals[0][0], getattr(reading, attr)))
+    return sorted(points)
+
+
+def _cost_points(
+    readings: Iterable[UsageReading], prices: dict[str, float]
+) -> list[tuple[datetime, float]]:
+    """Daily ``(day_start, cost)`` points: TOU kWh × cents/kWh, in dollars.
+
+    Cost is an estimate of the energy line item only — it excludes delivery,
+    regulatory charges, rebates and tax.
+    """
+    points: list[tuple[datetime, float]] = []
+    for reading in readings:
+        intervals = reading.intervals()
+        if not intervals:
+            continue
+        cents = (
+            reading.total_on_peak * prices["on_peak"]
+            + reading.total_mid_peak * prices["mid_peak"]
+            + reading.total_off_peak * prices["off_peak"]
+        )
+        points.append((intervals[0][0], cents / 100.0))
     return sorted(points)
 
 
@@ -135,8 +185,9 @@ async def _async_import_series(
     statistic_id: str,
     name: str,
     points: list[tuple[datetime, float]],
+    unit: str = UnitOfEnergy.KILO_WATT_HOUR,
 ) -> int:
-    """Import one forward-only kWh statistic series; return points added."""
+    """Import one forward-only sum statistic series; return points added."""
     if not points:
         return 0
 
@@ -154,11 +205,28 @@ async def _async_import_series(
         name=name,
         source=DOMAIN,
         statistic_id=statistic_id,
-        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        unit_of_measurement=unit,
     )
     LOGGER.debug("Adding %d statistics points to %s", len(stats), statistic_id)
     async_add_external_statistics(hass, metadata, stats)
     return len(stats)
+
+
+async def async_import_cost(
+    hass: HomeAssistant,
+    meter_id: str,
+    readings: Iterable[UsageReading],
+    prices: dict[str, float],
+    currency: str,
+) -> int:
+    """Import an estimated daily cost statistic from TOU usage × prices."""
+    return await _async_import_series(
+        hass,
+        cost_statistic_id(meter_id),
+        f"Enova Power cost ({meter_id})",
+        _cost_points(readings, prices),
+        unit=currency,
+    )
 
 
 async def async_import_statistics(

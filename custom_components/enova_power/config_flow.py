@@ -8,13 +8,28 @@ from typing import Any
 import voluptuous as vol
 from enovapower import AsyncEnovaClient, EnovaAuthError, EnovaNetworkError
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, LOGGER
+from .const import CONF_PLAN, DEFAULT_PLAN, DOMAIN, LOGGER, PLANS
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_USERNAME): str,
+        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_PLAN, default=DEFAULT_PLAN): vol.In(PLANS),
+    }
+)
+
+# Re-auth collects credentials only; the plan is unchanged there.
+REAUTH_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
@@ -24,6 +39,12 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 class EnovaPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Enova Power."""
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow handler."""
+        return EnovaPowerOptionsFlow()
 
     async def _validate(self, username: str, password: str) -> tuple[str, dict[str, str]]:
         """Try to log in. Return (account_number, errors)."""
@@ -89,6 +110,27 @@ class EnovaPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            data_schema=REAUTH_SCHEMA,
             errors=errors,
+        )
+
+
+class EnovaPowerOptionsFlow(OptionsFlow):
+    """Handle Enova Power options (pricing plan)."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the pricing plan option."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current = self.config_entry.options.get(CONF_PLAN) or self.config_entry.data.get(
+            CONF_PLAN, DEFAULT_PLAN
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_PLAN, default=current): vol.In(PLANS)}
+            ),
         )

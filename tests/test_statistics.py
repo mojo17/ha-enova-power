@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from enovapower import UsageReading
+import pytest
+from enovapower import TariffRate, UsageReading
 
 from custom_components.enova_power.statistics import (
     TOU_BUCKETS,
     _build_statistics,
+    _cost_points,
     _daily_points,
     _flatten_points,
     _normalize_start,
     bucket_statistic_id,
     consumption_statistic_id,
+    cost_statistic_id,
+    tou_prices,
 )
 
 
@@ -40,6 +44,48 @@ async def test_daily_points_uses_day_start_and_attr() -> None:
     start, value = points[0]
     assert value == 5.0
     # day start = h01 = 2026-01-02 00:00 EST = 05:00 UTC
+    assert start == datetime(2026, 1, 2, 5, tzinfo=timezone.utc)
+
+
+def _tou_rate(name: str, price: float, plan: str = "Time-of-Use") -> TariffRate:
+    return TariffRate(
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 4, 30),
+        plan=plan,
+        name=name,
+        price=price,
+    )
+
+
+async def test_cost_statistic_id() -> None:
+    assert cost_statistic_id("111111") == "enova_power:energy_cost_111111"
+
+
+async def test_tou_prices_complete() -> None:
+    rates = [
+        _tou_rate("TOU On-peak", 20.0),
+        _tou_rate("TOU Mid-peak", 15.0),
+        _tou_rate("TOU Off-peak", 9.0),
+        _tou_rate("ULO Off-peak", 8.0, plan="Ultra-Low Overnight"),  # ignored
+    ]
+    assert tou_prices(rates) == {"on_peak": 20.0, "mid_peak": 15.0, "off_peak": 9.0}
+
+
+async def test_tou_prices_incomplete_returns_none() -> None:
+    assert tou_prices([_tou_rate("TOU On-peak", 20.0)]) is None
+
+
+async def test_cost_points_converts_cents_to_dollars() -> None:
+    reading = _reading(date(2026, 1, 2), h01=1.0)
+    reading.total_on_peak = 2.0
+    reading.total_mid_peak = 3.0
+    reading.total_off_peak = 5.0
+    prices = {"on_peak": 20.0, "mid_peak": 15.0, "off_peak": 10.0}  # cents/kWh
+    points = _cost_points([reading], prices)
+    # 2*20 + 3*15 + 5*10 = 135 cents = $1.35
+    assert len(points) == 1
+    start, cost = points[0]
+    assert cost == pytest.approx(1.35)
     assert start == datetime(2026, 1, 2, 5, tzinfo=timezone.utc)
 
 

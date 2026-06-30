@@ -21,3 +21,20 @@ RECENT_DAYS = 5
 
 # External statistics namespace: "<domain>:<object_id>" (the colon is required).
 STAT_ID_PREFIX = f"{DOMAIN}:"
+
+# Pricing plan selection (config/options). Values map to the library's tariff
+# plan names. Cost is currently computed for Time-of-Use; ULO/Tiered are
+# selectable but their cost math is not implemented yet.
+CONF_PLAN = "plan"
+PLAN_TOU = "time_of_use"
+PLAN_ULO = "ulo"
+PLAN_TIERED = "tiered"
+PLANS = {
+    PLAN_TOU: "Time-of-Use",
+    PLAN_ULO: "Ultra-Low Overnight",
+    PLAN_TIERED: "Tiered",
+}
+DEFAULT_PLAN = PLAN_TOU
+
+# Cost statistics are reported in Canadian dollars.
+CURRENCY = "CAD"
