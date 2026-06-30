@@ -4,8 +4,9 @@ Each cycle fetches usage and imports it into Home Assistant long-term
 statistics. The download window is derived from the recorder, not an in-memory
 flag: with no prior statistics it backfills ``BACKFILL_MONTHS`` of history
 (once), and thereafter fetches incrementally — so restarts are cheap and the
-cumulative statistics stay forward-only. The coordinator's ``data`` is the
-latest reading, used by the informational sensors.
+cumulative statistics stay forward-only. Every meter on the account is fetched
+and imported under its own ``statistic_id``; the coordinator's ``data`` maps
+each meter id to its latest reading, used by the informational sensors.
 """
 
 from __future__ import annotations
@@ -43,8 +44,8 @@ def fetch_from_date(last_start: datetime | None, today: date) -> date:
     return min(last_start.date() - timedelta(days=1), today - timedelta(days=RECENT_DAYS))
 
 
-class EnovaPowerCoordinator(DataUpdateCoordinator[UsageReading | None]):
-    """Coordinate Enova Power downloads and statistics imports."""
+class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]]):
+    """Coordinate Enova Power downloads and statistics imports (per meter)."""
 
     def __init__(
         self,
@@ -62,20 +63,29 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[UsageReading | None]):
         )
         self.client = client
 
-    async def _async_update_data(self) -> UsageReading | None:
-        """Fetch usage, import statistics, and return the latest reading."""
-        statistic_id = consumption_statistic_id(self.client.meter_id)
-        last_start = await async_last_statistic_start(self.hass, statistic_id)
-        from_date = fetch_from_date(last_start, date.today())
-        if last_start is None:
-            LOGGER.debug("No prior statistics; backfilling from %s", from_date)
-
+    async def _async_update_data(self) -> dict[str, UsageReading | None]:
+        """Fetch + import each meter; return the latest reading per meter."""
+        today = date.today()
+        latest: dict[str, UsageReading | None] = {}
         try:
-            readings = await self.client.download_usage(from_date, date.today())
+            for meter_id in self.client.meter_ids:
+                statistic_id = consumption_statistic_id(meter_id)
+                last_start = await async_last_statistic_start(self.hass, statistic_id)
+                from_date = fetch_from_date(last_start, today)
+                if last_start is None:
+                    LOGGER.debug(
+                        "No prior statistics for meter %s; backfilling from %s",
+                        meter_id,
+                        from_date,
+                    )
+                readings = await self.client.download_usage(
+                    from_date, today, meter_id=meter_id
+                )
+                await async_import_statistics(self.hass, meter_id, readings)
+                latest[meter_id] = max(readings, key=lambda r: r.date) if readings else None
         except EnovaAuthError as err:  # also covers EnovaSessionExpiredError
             raise ConfigEntryAuthFailed(str(err)) from err
         except EnovaError as err:  # also covers EnovaNetworkError + parse/form errors
             raise UpdateFailed(str(err)) from err
 
-        await async_import_statistics(self.hass, self.client.meter_id, readings)
-        return max(readings, key=lambda r: r.date) if readings else None
+        return latest

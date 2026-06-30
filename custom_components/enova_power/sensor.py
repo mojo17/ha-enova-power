@@ -59,15 +59,17 @@ async def async_setup_entry(
     entry: EnovaPowerConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Enova Power sensors from a config entry."""
+    """Set up Enova Power sensors from a config entry (one set per meter)."""
     coordinator = entry.runtime_data
     async_add_entities(
-        EnovaPowerSensor(coordinator, description) for description in SENSORS
+        EnovaPowerSensor(coordinator, meter_id, description)
+        for meter_id in coordinator.client.meter_ids
+        for description in SENSORS
     )
 
 
 class EnovaPowerSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
-    """A sensor backed by the latest Enova Power reading."""
+    """A sensor backed by the latest reading for a specific meter."""
 
     entity_description: EnovaSensorDescription
     _attr_has_entity_name = True
@@ -75,23 +77,25 @@ class EnovaPowerSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
     def __init__(
         self,
         coordinator: EnovaPowerCoordinator,
+        meter_id: str,
         description: EnovaSensorDescription,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
-        meter_id = coordinator.client.meter_id
+        self._meter_id = meter_id
         self._attr_unique_id = f"{meter_id}_{description.key}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, meter_id or "unknown")},
+            identifiers={(DOMAIN, meter_id)},
             manufacturer="Enova Power",
-            name=f"Enova Power meter {meter_id}" if meter_id else "Enova Power",
+            name=f"Enova Power meter {meter_id}",
         )
 
     @property
     def native_value(self) -> float | datetime | None:
-        """Return the current value, or None if no reading yet."""
-        reading = self.coordinator.data
+        """Return the current value for this meter, or None if no reading yet."""
+        data = self.coordinator.data
+        reading = data.get(self._meter_id) if data else None
         if reading is None:
             return None
         return self.entity_description.value_fn(reading)
