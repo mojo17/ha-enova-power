@@ -12,8 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from enovapower import UsageReading
-
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -28,16 +26,16 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import EnovaPowerConfigEntry
-from .const import DOMAIN, PERIODS, TIME_ZONE
-from .coordinator import EnovaPowerCoordinator
+from .const import CURRENCY, DOMAIN, PERIODS, TIME_ZONE
+from .coordinator import EnovaPowerCoordinator, MeterData
 from .schedule import current_period
 
 
 @dataclass(frozen=True, kw_only=True)
 class EnovaSensorDescription(SensorEntityDescription):
-    """Describes an Enova Power sensor."""
+    """Describes an Enova Power per-meter sensor."""
 
-    value_fn: Callable[[UsageReading], float | datetime | None]
+    value_fn: Callable[[MeterData], float | datetime | None]
 
 
 SENSORS: tuple[EnovaSensorDescription, ...] = (
@@ -46,13 +44,31 @@ SENSORS: tuple[EnovaSensorDescription, ...] = (
         translation_key="latest_daily_consumption",
         device_class=SensorDeviceClass.ENERGY,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        value_fn=lambda r: round(r.total, 3),
+        value_fn=lambda d: round(d.latest.total, 3) if d.latest else None,
     ),
     EnovaSensorDescription(
         key="latest_reading_date",
         translation_key="latest_reading_date",
         device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda r: datetime.combine(r.date, time.min, tzinfo=timezone.utc),
+        value_fn=lambda d: (
+            datetime.combine(d.latest.date, time.min, tzinfo=timezone.utc)
+            if d.latest
+            else None
+        ),
+    ),
+    EnovaSensorDescription(
+        key="month_to_date_energy",
+        translation_key="month_to_date_energy",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        value_fn=lambda d: round(d.mtd_energy, 3),
+    ),
+    EnovaSensorDescription(
+        key="month_to_date_cost",
+        translation_key="month_to_date_cost",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement=CURRENCY,
+        value_fn=lambda d: round(d.mtd_cost, 2) if d.mtd_cost is not None else None,
     ),
 )
 
@@ -100,12 +116,12 @@ class EnovaPowerSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | datetime | None:
-        """Return the current value for this meter, or None if no reading yet."""
+        """Return the current value for this meter, or None if no data yet."""
         data = self.coordinator.data
-        reading = data.get(self._meter_id) if data else None
-        if reading is None:
+        meter_data = data.get(self._meter_id) if data else None
+        if meter_data is None:
             return None
-        return self.entity_description.value_fn(reading)
+        return self.entity_description.value_fn(meter_data)
 
 
 class EnovaCurrentPeriodSensor(SensorEntity):

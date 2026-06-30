@@ -167,6 +167,11 @@ def _cost_points(
     return sorted(points)
 
 
+def total_cost(readings: Iterable[UsageReading], prices: dict[str, float]) -> float:
+    """Total estimated cost (dollars) across ``readings`` for TOU ``prices``."""
+    return sum(cost for _, cost in _cost_points(readings, prices))
+
+
 def _build_statistics(
     points: list[tuple[datetime, float]],
     last_start: datetime | None,

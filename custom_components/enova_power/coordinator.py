@@ -11,6 +11,7 @@ each meter id to its latest reading, used by the informational sensors.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -38,10 +39,20 @@ from .statistics import (
     async_last_statistic_start,
     consumption_statistic_id,
     plan_prices,
+    total_cost,
 )
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
+
+
+@dataclass
+class MeterData:
+    """Per-meter state exposed to sensors."""
+
+    latest: UsageReading | None
+    mtd_energy: float  # kWh consumed this calendar month, to the latest day
+    mtd_cost: float | None  # estimated month-to-date cost (CAD), TOU only
 
 
 def fetch_from_date(last_start: datetime | None, today: date) -> date:
@@ -57,7 +68,7 @@ def fetch_from_date(last_start: datetime | None, today: date) -> date:
     return min(last_start.date() - timedelta(days=1), today - timedelta(days=RECENT_DAYS))
 
 
-class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]]):
+class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
     """Coordinate Enova Power downloads and statistics imports (per meter)."""
 
     def __init__(
@@ -85,10 +96,11 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
         entry = self.config_entry
         return entry.options.get(CONF_PLAN) or entry.data.get(CONF_PLAN, DEFAULT_PLAN)
 
-    async def _async_update_data(self) -> dict[str, UsageReading | None]:
-        """Fetch + import each meter; return the latest reading per meter."""
+    async def _async_update_data(self) -> dict[str, MeterData]:
+        """Fetch + import each meter; return latest reading and MTD totals."""
         today = date.today()
-        latest: dict[str, UsageReading | None] = {}
+        month_start = today.replace(day=1)
+        data: dict[str, MeterData] = {}
         try:
             self.prices = await self._fetch_prices(today)
             cost_prices = (
@@ -99,7 +111,8 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
             for meter_id in self.client.meter_ids:
                 statistic_id = consumption_statistic_id(meter_id)
                 last_start = await async_last_statistic_start(self.hass, statistic_id)
-                from_date = fetch_from_date(last_start, today)
+                # Always cover the current month so month-to-date can be summed.
+                from_date = min(fetch_from_date(last_start, today), month_start)
                 if last_start is None:
                     LOGGER.debug(
                         "No prior statistics for meter %s; backfilling from %s",
@@ -114,13 +127,19 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
                     await async_import_cost(
                         self.hass, meter_id, readings, cost_prices, CURRENCY
                     )
-                latest[meter_id] = max(readings, key=lambda r: r.date) if readings else None
+
+                month = [r for r in readings if r.date >= month_start]
+                data[meter_id] = MeterData(
+                    latest=max(readings, key=lambda r: r.date) if readings else None,
+                    mtd_energy=sum(r.total for r in month),
+                    mtd_cost=total_cost(month, cost_prices) if cost_prices else None,
+                )
         except EnovaAuthError as err:  # also covers EnovaSessionExpiredError
             raise ConfigEntryAuthFailed(str(err)) from err
         except EnovaError as err:  # also covers EnovaNetworkError + parse/form errors
             raise UpdateFailed(str(err)) from err
 
-        return latest
+        return data
 
     async def _fetch_prices(self, today: date) -> dict[str, float]:
         """Current ``{period: cents/kWh}`` for the active plan (best effort).

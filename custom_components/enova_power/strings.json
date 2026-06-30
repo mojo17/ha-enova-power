@@ -49,6 +49,12 @@
       "latest_reading_date": {
         "name": "Latest reading date"
       },
+      "month_to_date_energy": {
+        "name": "Month-to-date consumption"
+      },
+      "month_to_date_cost": {
+        "name": "Month-to-date cost"
+      },
       "current_period": {
         "name": "Current pricing period",
         "state": {

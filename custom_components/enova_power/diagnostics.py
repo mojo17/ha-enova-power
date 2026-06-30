@@ -23,10 +23,14 @@ async def async_get_config_entry_diagnostics(
         "meter_count": len(coordinator.client.meter_ids),
         "meters": [
             {
-                "latest_reading_date": reading.date.isoformat() if reading else None,
-                "latest_total_kwh": reading.total if reading else None,
+                "latest_reading_date": (
+                    md.latest.date.isoformat() if md.latest else None
+                ),
+                "latest_total_kwh": md.latest.total if md.latest else None,
+                "mtd_energy_kwh": md.mtd_energy,
+                "mtd_cost": md.mtd_cost,
             }
-            for reading in data.values()
+            for md in data.values()
         ],
         "config_keys_present": sorted(k for k in entry.data if k not in TO_REDACT),
     }

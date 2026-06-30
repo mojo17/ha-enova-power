@@ -19,6 +19,7 @@ from custom_components.enova_power.statistics import (
     consumption_statistic_id,
     cost_statistic_id,
     plan_prices,
+    total_cost,
 )
 
 
@@ -93,6 +94,17 @@ async def test_cost_points_converts_cents_to_dollars() -> None:
     start, cost = points[0]
     assert cost == pytest.approx(1.35)
     assert start == datetime(2026, 1, 2, 5, tzinfo=timezone.utc)
+
+
+async def test_total_cost_sums_days() -> None:
+    prices = {"on_peak": 20.0, "mid_peak": 15.0, "off_peak": 10.0}
+    readings = []
+    for day in (2, 3):
+        r = _reading(date(2026, 1, day), h01=1.0)
+        r.total_on_peak, r.total_mid_peak, r.total_off_peak = 2.0, 3.0, 5.0
+        readings.append(r)
+    # each day = $1.35, two days = $2.70
+    assert total_cost(readings, prices) == pytest.approx(2.70)
 
 
 async def test_normalize_start_float() -> None:
