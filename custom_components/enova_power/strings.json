@@ -58,6 +58,9 @@
           "ulo_overnight": "ULO overnight",
           "tiered": "Tiered"
         }
+      },
+      "current_rate": {
+        "name": "Current rate"
       }
     }
   }

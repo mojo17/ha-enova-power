@@ -32,11 +32,12 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .statistics import (
+    COST_PERIODS,
     async_import_cost,
     async_import_statistics,
     async_last_statistic_start,
     consumption_statistic_id,
-    tou_prices,
+    plan_prices,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +75,9 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
             config_entry=entry,
         )
         self.client = client
+        # period → cents/kWh for the active plan, refreshed each cycle; read by
+        # the current-rate sensor. Empty until the first successful tariff fetch.
+        self.prices: dict[str, float] = {}
 
     @property
     def plan(self) -> str:
@@ -86,7 +90,12 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
         today = date.today()
         latest: dict[str, UsageReading | None] = {}
         try:
-            prices = await self._tou_prices(today)
+            self.prices = await self._fetch_prices(today)
+            cost_prices = (
+                self.prices
+                if self.plan == PLAN_TOU and set(COST_PERIODS) <= self.prices.keys()
+                else None
+            )
             for meter_id in self.client.meter_ids:
                 statistic_id = consumption_statistic_id(meter_id)
                 last_start = await async_last_statistic_start(self.hass, statistic_id)
@@ -101,9 +110,9 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
                     from_date, today, meter_id=meter_id
                 )
                 await async_import_statistics(self.hass, meter_id, readings)
-                if prices:
+                if cost_prices:
                     await async_import_cost(
-                        self.hass, meter_id, readings, prices, CURRENCY
+                        self.hass, meter_id, readings, cost_prices, CURRENCY
                     )
                 latest[meter_id] = max(readings, key=lambda r: r.date) if readings else None
         except EnovaAuthError as err:  # also covers EnovaSessionExpiredError
@@ -113,20 +122,16 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, UsageReading | None]
 
         return latest
 
-    async def _tou_prices(self, today: date) -> dict[str, float] | None:
-        """Current Time-of-Use prices, or None if not on TOU / unavailable.
+    async def _fetch_prices(self, today: date) -> dict[str, float]:
+        """Current ``{period: cents/kWh}`` for the active plan (best effort).
 
-        Historical cost is estimated using the current rates (a documented
-        approximation); ULO/Tiered cost is not implemented yet.
+        Read by the current-rate sensor and, for TOU, used for the cost
+        estimate. Historical cost uses the current rates (a documented
+        approximation).
         """
-        if self.plan != PLAN_TOU:
-            return None
         try:
             rates = await self.client.download_tariff(today - timedelta(days=30), today)
         except EnovaError as err:
-            LOGGER.warning("Could not fetch tariff for cost estimate: %s", err)
-            return None
-        prices = tou_prices(rates)
-        if prices is None:
-            LOGGER.warning("Time-of-Use prices incomplete; skipping cost estimate")
-        return prices
+            LOGGER.warning("Could not fetch tariff prices: %s", err)
+            return {}
+        return plan_prices(rates, self.plan)

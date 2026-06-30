@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 import pytest
 from enovapower import TariffRate, UsageReading
 
+from custom_components.enova_power.const import PLAN_TOU
 from custom_components.enova_power.statistics import (
     TOU_BUCKETS,
     _build_statistics,
@@ -17,7 +18,7 @@ from custom_components.enova_power.statistics import (
     bucket_statistic_id,
     consumption_statistic_id,
     cost_statistic_id,
-    tou_prices,
+    plan_prices,
 )
 
 
@@ -61,18 +62,23 @@ async def test_cost_statistic_id() -> None:
     assert cost_statistic_id("111111") == "enova_power:energy_cost_111111"
 
 
-async def test_tou_prices_complete() -> None:
+async def test_plan_prices_tou() -> None:
     rates = [
         _tou_rate("TOU On-peak", 20.0),
         _tou_rate("TOU Mid-peak", 15.0),
         _tou_rate("TOU Off-peak", 9.0),
         _tou_rate("ULO Off-peak", 8.0, plan="Ultra-Low Overnight"),  # ignored
     ]
-    assert tou_prices(rates) == {"on_peak": 20.0, "mid_peak": 15.0, "off_peak": 9.0}
+    assert plan_prices(rates, PLAN_TOU) == {
+        "on_peak": 20.0,
+        "mid_peak": 15.0,
+        "off_peak": 9.0,
+    }
 
 
-async def test_tou_prices_incomplete_returns_none() -> None:
-    assert tou_prices([_tou_rate("TOU On-peak", 20.0)]) is None
+async def test_plan_prices_partial_on_missing_names() -> None:
+    # Only the matched periods are returned; callers degrade gracefully.
+    assert plan_prices([_tou_rate("TOU On-peak", 20.0)], PLAN_TOU) == {"on_peak": 20.0}
 
 
 async def test_cost_points_converts_cents_to_dollars() -> None:

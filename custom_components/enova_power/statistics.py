@@ -27,7 +27,18 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, LOGGER
+from .const import (
+    DOMAIN,
+    LOGGER,
+    PERIOD_MID_PEAK,
+    PERIOD_OFF_PEAK,
+    PERIOD_ON_PEAK,
+    PERIOD_TIERED,
+    PERIOD_ULO_OVERNIGHT,
+    PLAN_TIERED,
+    PLAN_TOU,
+    PLAN_ULO,
+)
 
 
 def consumption_statistic_id(meter_id: str) -> str:
@@ -54,27 +65,40 @@ def cost_statistic_id(meter_id: str) -> str:
     return f"{DOMAIN}:energy_cost_{meter_id}"
 
 
-# Time-of-Use bucket → the rate name the library scrapes from the tariff table.
-TOU_PRICE_NAMES: dict[str, str] = {
-    "on_peak": "TOU On-peak",
-    "mid_peak": "TOU Mid-peak",
-    "off_peak": "TOU Off-peak",
+# period → (tariff plan name, rate name) the library scrapes from the price
+# table. TOU names are confirmed; ULO/Tiered names are a best guess until
+# validated against a real portal export, so plan_prices returns only what it
+# matches and callers degrade gracefully on misses.
+PLAN_PRICE_NAMES: dict[str, dict[str, tuple[str, str]]] = {
+    PLAN_TOU: {
+        PERIOD_ON_PEAK: ("Time-of-Use", "TOU On-peak"),
+        PERIOD_MID_PEAK: ("Time-of-Use", "TOU Mid-peak"),
+        PERIOD_OFF_PEAK: ("Time-of-Use", "TOU Off-peak"),
+    },
+    PLAN_ULO: {
+        PERIOD_ULO_OVERNIGHT: ("Ultra-Low Overnight", "ULO Overnight"),
+        PERIOD_OFF_PEAK: ("Ultra-Low Overnight", "ULO Off-peak"),
+        PERIOD_MID_PEAK: ("Ultra-Low Overnight", "ULO Mid-peak"),
+        PERIOD_ON_PEAK: ("Ultra-Low Overnight", "ULO On-peak"),
+    },
+    PLAN_TIERED: {
+        PERIOD_TIERED: ("Tiered", "Tier 1"),
+    },
 }
 
+# TOU buckets cost computation requires.
+COST_PERIODS = (PERIOD_ON_PEAK, PERIOD_MID_PEAK, PERIOD_OFF_PEAK)
 
-def tou_prices(rates: Iterable) -> dict[str, float] | None:
-    """Extract {bucket: cents_per_kWh} for the Time-of-Use plan, or None.
 
-    Returns None unless all three TOU buckets are present, so cost is only
-    computed when the full price set is available.
+def plan_prices(rates: Iterable, plan: str) -> dict[str, float]:
+    """Map scraped tariff rates to ``{period: cents_per_kWh}`` for ``plan``.
+
+    Returns only the periods whose (plan, rate name) was found, so a partial
+    or empty result is possible if the portal's names differ from expectations.
     """
-    by_name = {r.name: r.price for r in rates if r.plan == "Time-of-Use"}
-    prices = {
-        bucket: by_name[name]
-        for bucket, name in TOU_PRICE_NAMES.items()
-        if name in by_name
-    }
-    return prices if len(prices) == len(TOU_PRICE_NAMES) else None
+    names = PLAN_PRICE_NAMES.get(plan, {})
+    by_key = {(r.plan, r.name): r.price for r in rates}
+    return {period: by_key[key] for period, key in names.items() if key in by_key}
 
 
 def _normalize_start(value: object) -> datetime | None:

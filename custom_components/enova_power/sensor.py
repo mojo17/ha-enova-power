@@ -69,8 +69,9 @@ async def async_setup_entry(
         for meter_id in coordinator.client.meter_ids
         for description in SENSORS
     ]
-    # One account-wide sensor for the live pricing period.
+    # Account-wide sensors for the live pricing period and rate.
     entities.append(EnovaCurrentPeriodSensor(entry.entry_id, coordinator.plan))
+    entities.append(EnovaCurrentRateSensor(coordinator, entry.entry_id))
     async_add_entities(entities)
 
 
@@ -137,6 +138,52 @@ class EnovaCurrentPeriodSensor(SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         """Refresh on the hour, when periods can change."""
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._handle_tick, minute=0, second=0
+            )
+        )
+
+    @callback
+    def _handle_tick(self, now: datetime) -> None:
+        self.async_write_ha_state()
+
+
+class EnovaCurrentRateSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
+    """The electricity rate (¢/kWh) for the active pricing period (account-wide).
+
+    Combines the live period (OEB schedule) with the plan's scraped prices.
+    Returns None if the price for the current period isn't available (e.g. the
+    portal's rate names for ULO/Tiered differ from expectations).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "current_rate"
+    _attr_native_unit_of_measurement = "¢/kWh"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: EnovaPowerCoordinator, entry_id: str) -> None:
+        """Initialize the rate sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry_id}_current_rate"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry_id}_account")},
+            manufacturer="Enova Power",
+            name="Enova Power",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the rate for the current period, or None if unknown."""
+        prices = self.coordinator.prices
+        if not prices:
+            return None
+        period = current_period(dt_util.now(TIME_ZONE), self.coordinator.plan)
+        return prices.get(period)
+
+    async def async_added_to_hass(self) -> None:
+        """Also refresh on the hour, when the period (and thus rate) changes."""
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_track_time_change(
                 self.hass, self._handle_tick, minute=0, second=0
