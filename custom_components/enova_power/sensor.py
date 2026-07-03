@@ -200,6 +200,17 @@ class EnovaMeterSensor(CoordinatorEntity[EnovaPowerCoordinator], SensorEntity):
         return data.get(self._meter_id) if data else None
 
     @property
+    def available(self) -> bool:
+        # Tier sensors only apply on the Tiered plan (threshold is set then);
+        # mark them unavailable elsewhere instead of showing "Unknown".
+        if not super().available:
+            return False
+        if self.entity_description.key in ("current_tier", "kwh_to_tier_2"):
+            data = self._data
+            return data is not None and data.threshold is not None
+        return True
+
+    @property
     def native_value(self) -> float | str | datetime | None:
         data = self._data
         return self.entity_description.value_fn(data) if data else None
