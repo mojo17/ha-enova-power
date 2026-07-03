@@ -41,8 +41,8 @@ RECENT_DAYS = 5
 STAT_ID_PREFIX = f"{DOMAIN}:"
 
 # Pricing plan selection (config/options). Values map to the library's tariff
-# plan names. Cost is currently computed for Time-of-Use; ULO/Tiered are
-# selectable but their cost math is not implemented yet.
+# plan names. Cost is computed for Time-of-Use and Tiered; ULO cost math is not
+# implemented yet.
 CONF_PLAN = "plan"
 PLAN_TOU = "time_of_use"
 PLAN_ULO = "ulo"

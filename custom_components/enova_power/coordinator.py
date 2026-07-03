@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from enovapower import AsyncEnovaClient, EnovaAuthError, EnovaError, UsageReading
+from enovapower import (
+    AsyncEnovaClient,
+    EnovaAuthError,
+    EnovaError,
+    TariffRate,
+    UsageReading,
+)
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -28,6 +34,7 @@ from .const import (
     DEFAULT_PLAN,
     DOMAIN,
     LOGGER,
+    PLAN_TIERED,
     PLAN_TOU,
     RECENT_DAYS,
     UPDATE_INTERVAL,
@@ -36,9 +43,12 @@ from .statistics import (
     COST_PERIODS,
     async_import_cost,
     async_import_statistics,
+    async_import_tiered_cost,
     async_last_statistic_start,
     consumption_statistic_id,
     plan_prices,
+    tiered_rates,
+    tiered_total_cost,
     total_cost,
 )
 
@@ -113,12 +123,14 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
         month_start = today.replace(day=1)
         data: dict[str, MeterData] = {}
         try:
-            self.prices = await self._fetch_prices(today)
-            cost_prices = (
+            rates = await self._fetch_rates(today)
+            self.prices = plan_prices(rates, self.plan)
+            tou_prices = (
                 self.prices
                 if self.plan == PLAN_TOU and set(COST_PERIODS) <= self.prices.keys()
                 else None
             )
+            tiered = tiered_rates(rates) if self.plan == PLAN_TIERED else None
             for meter_id in self.client.meter_ids:
                 statistic_id = consumption_statistic_id(meter_id)
                 last_start = await async_last_statistic_start(self.hass, statistic_id)
@@ -134,16 +146,26 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
                     from_date, today, meter_id=meter_id
                 )
                 await async_import_statistics(self.hass, meter_id, readings)
-                if cost_prices:
+                if tou_prices:
                     await async_import_cost(
-                        self.hass, meter_id, readings, cost_prices, CURRENCY
+                        self.hass, meter_id, readings, tou_prices, CURRENCY
+                    )
+                elif tiered:
+                    await async_import_tiered_cost(
+                        self.hass, meter_id, readings, tiered, CURRENCY
                     )
 
                 month = [r for r in readings if r.date >= month_start]
+                if tou_prices:
+                    mtd_cost = total_cost(month, tou_prices)
+                elif tiered:
+                    mtd_cost = tiered_total_cost(month, tiered)
+                else:
+                    mtd_cost = None
                 data[meter_id] = MeterData(
                     latest=max(readings, key=lambda r: r.date) if readings else None,
                     mtd_energy=sum(r.total for r in month),
-                    mtd_cost=total_cost(month, cost_prices) if cost_prices else None,
+                    mtd_cost=mtd_cost,
                 )
         except EnovaAuthError as err:  # also covers EnovaSessionExpiredError
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -152,16 +174,15 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
 
         return data
 
-    async def _fetch_prices(self, today: date) -> dict[str, float]:
-        """Current ``{period: cents/kWh}`` for the active plan (best effort).
+    async def _fetch_rates(self, today: date) -> list[TariffRate]:
+        """Current tariff rates for all plans (best effort; empty on failure).
 
-        Read by the current-rate sensor and, for TOU, used for the cost
-        estimate. Historical cost uses the current rates (a documented
-        approximation).
+        Reduced to the active plan's period rates for the current-rate sensor,
+        and used for the TOU/Tiered cost estimates. Historical cost uses these
+        current rates/threshold (a documented approximation).
         """
         try:
-            rates = await self.client.download_tariff(today - timedelta(days=30), today)
+            return await self.client.download_tariff(today - timedelta(days=30), today)
         except EnovaError as err:
             LOGGER.warning("Could not fetch tariff prices: %s", err)
-            return {}
-        return plan_prices(rates, self.plan)
+            return []

@@ -10,15 +10,19 @@ from enovapower import TariffRate, UsageReading
 from custom_components.enova_power.const import PLAN_TOU
 from custom_components.enova_power.statistics import (
     TOU_BUCKETS,
+    TieredRates,
     _build_statistics,
     _cost_points,
     _daily_points,
     _flatten_points,
     _normalize_start,
+    _tiered_cost_points,
     bucket_statistic_id,
     consumption_statistic_id,
     cost_statistic_id,
     plan_prices,
+    tiered_rates,
+    tiered_total_cost,
     total_cost,
 )
 
@@ -153,3 +157,71 @@ async def test_build_statistics_resumes_and_dedups() -> None:
     assert len(stats) == 1
     assert stats[0]["start"] == base.replace(hour=7)
     assert stats[0]["sum"] == 13.0
+
+
+def _tier_rate(name: str, price: float, tstart: float, tend: float | None) -> TariffRate:
+    return TariffRate(
+        start_date=date(2026, 5, 1),
+        end_date=date(2026, 10, 31),
+        plan="Tiered",
+        name=name,
+        price=price,
+        threshold_start=tstart,
+        threshold_end=tend,
+    )
+
+
+# tier1 10¢/kWh, tier2 20¢/kWh, 600 kWh/month threshold.
+TIERED = TieredRates(tier1=10.0, tier2=20.0, threshold=600.0)
+
+
+async def test_tiered_rates_extracts() -> None:
+    rates = [
+        _tier_rate("Tier 1", 10.0, 0.0, 600.0),
+        _tier_rate("Tier 2", 20.0, 600.0, None),
+    ]
+    assert tiered_rates(rates) == TIERED
+
+
+async def test_tiered_rates_none_when_incomplete() -> None:
+    # Missing Tier 2.
+    assert tiered_rates([_tier_rate("Tier 1", 10.0, 0.0, 600.0)]) is None
+    # Missing threshold on Tier 1.
+    rates = [
+        _tier_rate("Tier 1", 10.0, 0.0, None),
+        _tier_rate("Tier 2", 20.0, 600.0, None),
+    ]
+    assert tiered_rates(rates) is None
+
+
+async def test_tiered_cost_below_threshold_all_tier1() -> None:
+    points = _tiered_cost_points([_reading(date(2026, 6, 1), h01=100.0)], TIERED)
+    assert [c for _, c in points] == pytest.approx([10.0])  # 100 kWh × 10¢ = $10
+
+
+async def test_tiered_cost_crosses_threshold_within_month() -> None:
+    readings = [
+        _reading(date(2026, 6, 1), h01=500.0),  # 500 @ tier1 = $50
+        _reading(date(2026, 6, 2), h01=200.0),  # 100 @ tier1 + 100 @ tier2 = $30
+    ]
+    assert [c for _, c in _tiered_cost_points(readings, TIERED)] == pytest.approx(
+        [50.0, 30.0]
+    )
+
+
+async def test_tiered_cost_resets_each_calendar_month() -> None:
+    readings = [
+        _reading(date(2026, 6, 30), h01=700.0),  # June: 600@t1 + 100@t2 = $80
+        _reading(date(2026, 7, 1), h01=100.0),  # July resets: 100@t1 = $10
+    ]
+    by_month = {start.month: cost for start, cost in _tiered_cost_points(readings, TIERED)}
+    assert by_month[6] == pytest.approx(80.0)
+    assert by_month[7] == pytest.approx(10.0)
+
+
+async def test_tiered_total_cost_sums_month() -> None:
+    readings = [
+        _reading(date(2026, 6, 1), h01=500.0),
+        _reading(date(2026, 6, 2), h01=200.0),
+    ]
+    assert tiered_total_cost(readings, TIERED) == pytest.approx(80.0)

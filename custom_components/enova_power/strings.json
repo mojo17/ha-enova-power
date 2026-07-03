@@ -33,7 +33,7 @@
     "step": {
       "init": {
         "title": "Enova Power options",
-        "description": "Your plan is detected automatically from your account — set it here only to override a wrong or missing detection. Cost is estimated from the energy line item only (excludes delivery, regulatory charges, rebates and tax) and is currently computed for Time-of-Use.",
+        "description": "Your plan is detected automatically from your account — set it here only to override a wrong or missing detection. Cost is estimated from the energy line item only (excludes delivery, regulatory charges, rebates and tax) and is currently computed for Time-of-Use and Tiered.",
         "data": {
           "plan": "Pricing plan"
         }

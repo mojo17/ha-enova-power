@@ -13,7 +13,9 @@ anything at or before it. That also makes re-imports idempotent.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from enovapower import UsageReading
@@ -101,6 +103,29 @@ def plan_prices(rates: Iterable, plan: str) -> dict[str, float]:
     return {period: by_key[key] for period, key in names.items() if key in by_key}
 
 
+@dataclass
+class TieredRates:
+    """The Tiered plan's two rates and its monthly kWh threshold."""
+
+    tier1: float  # cents/kWh at or below the threshold
+    tier2: float  # cents/kWh above the threshold
+    threshold: float  # kWh per billing month
+
+
+def tiered_rates(rates: Iterable) -> TieredRates | None:
+    """Extract the Tiered plan's rates + threshold from scraped tariff rates.
+
+    Returns None if either tier or the threshold is missing. The threshold is
+    Tier 1's upper bound (equal to Tier 2's lower bound).
+    """
+    by_name = {(r.plan, r.name): r for r in rates}
+    tier1 = by_name.get(("Tiered", "Tier 1"))
+    tier2 = by_name.get(("Tiered", "Tier 2"))
+    if tier1 is None or tier2 is None or tier1.threshold_end is None:
+        return None
+    return TieredRates(tier1=tier1.price, tier2=tier2.price, threshold=tier1.threshold_end)
+
+
 def _normalize_start(value: object) -> datetime | None:
     """Normalize a ``get_last_statistics`` 'start' to a UTC-aware datetime.
 
@@ -170,6 +195,46 @@ def _cost_points(
 def total_cost(readings: Iterable[UsageReading], prices: dict[str, float]) -> float:
     """Total estimated cost (dollars) across ``readings`` for TOU ``prices``."""
     return sum(cost for _, cost in _cost_points(readings, prices))
+
+
+def _tiered_cost_points(
+    readings: Iterable[UsageReading], tiered: TieredRates
+) -> list[tuple[datetime, float]]:
+    """Daily ``(day_start, cost)`` points (dollars) for the Tiered plan.
+
+    Within each calendar month the first ``threshold`` kWh bill at Tier 1 and the
+    remainder at Tier 2 (Ontario tiered billing). Month boundaries are calendar
+    months (the account's exact billing cycle isn't exposed), and — like the TOU
+    estimate — the current rates/threshold are applied to all history. Cost is an
+    estimate of the energy line item only (excludes delivery, regulatory charges,
+    rebates and tax).
+    """
+    by_month: dict[tuple[int, int], list[tuple[datetime, float]]] = defaultdict(list)
+    for reading in readings:
+        intervals = reading.intervals()
+        if not intervals:
+            continue
+        by_month[(reading.date.year, reading.date.month)].append(
+            (intervals[0][0], reading.total)
+        )
+
+    points: list[tuple[datetime, float]] = []
+    for days in by_month.values():
+        cumulative = 0.0
+        for day_start, day_kwh in sorted(days):
+            below_before = min(cumulative, tiered.threshold)
+            below_after = min(cumulative + day_kwh, tiered.threshold)
+            tier1_kwh = below_after - below_before
+            tier2_kwh = day_kwh - tier1_kwh
+            cents = tier1_kwh * tiered.tier1 + tier2_kwh * tiered.tier2
+            points.append((day_start, cents / 100.0))
+            cumulative += day_kwh
+    return sorted(points)
+
+
+def tiered_total_cost(readings: Iterable[UsageReading], tiered: TieredRates) -> float:
+    """Total estimated Tiered cost (dollars) across ``readings``."""
+    return sum(cost for _, cost in _tiered_cost_points(readings, tiered))
 
 
 def _build_statistics(
@@ -254,6 +319,26 @@ async def async_import_cost(
         cost_statistic_id(meter_id),
         f"Enova Power cost ({meter_id})",
         _cost_points(readings, prices),
+        unit=currency,
+    )
+
+
+async def async_import_tiered_cost(
+    hass: HomeAssistant,
+    meter_id: str,
+    readings: Iterable[UsageReading],
+    tiered: TieredRates,
+    currency: str,
+) -> int:
+    """Import an estimated daily cost statistic for the Tiered plan.
+
+    Uses the same cost ``statistic_id`` as TOU — only the active plan is imported.
+    """
+    return await _async_import_series(
+        hass,
+        cost_statistic_id(meter_id),
+        f"Enova Power cost ({meter_id})",
+        _tiered_cost_points(readings, tiered),
         unit=currency,
     )
 
