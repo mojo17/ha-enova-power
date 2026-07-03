@@ -92,9 +92,20 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
 
     @property
     def plan(self) -> str:
-        """The configured pricing plan (options override config data)."""
+        """Effective pricing plan.
+
+        Priority: an explicit options override, then the plan auto-detected from
+        the portal (``client.plan``, populated during the tariff fetch), then a
+        legacy configured value (entries created before auto-detection), then the
+        default.
+        """
         entry = self.config_entry
-        return entry.options.get(CONF_PLAN) or entry.data.get(CONF_PLAN, DEFAULT_PLAN)
+        return (
+            entry.options.get(CONF_PLAN)
+            or self.client.plan
+            or entry.data.get(CONF_PLAN)
+            or DEFAULT_PLAN
+        )
 
     async def _async_update_data(self) -> dict[str, MeterData]:
         """Fetch + import each meter; return latest reading and MTD totals."""

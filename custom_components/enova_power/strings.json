@@ -6,8 +6,7 @@
         "description": "Sign in with your Enova Power My Account credentials. This is an unofficial integration, not affiliated with Enova Power Corp.",
         "data": {
           "username": "Username (email)",
-          "password": "Password",
-          "plan": "Pricing plan"
+          "password": "Password"
         }
       },
       "reauth_confirm": {
@@ -34,7 +33,7 @@
     "step": {
       "init": {
         "title": "Enova Power options",
-        "description": "Cost is estimated from the energy line item only (excludes delivery, regulatory charges, rebates and tax). Cost is currently computed for Time-of-Use.",
+        "description": "Your plan is detected automatically from your account — set it here only to override a wrong or missing detection. Cost is estimated from the energy line item only (excludes delivery, regulatory charges, rebates and tax) and is currently computed for Time-of-Use.",
         "data": {
           "plan": "Pricing plan"
         }
