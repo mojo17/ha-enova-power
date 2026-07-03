@@ -1,12 +1,12 @@
 """Data update coordinator for Enova Power.
 
-Each cycle fetches usage and imports it into Home Assistant long-term
-statistics. The download window is derived from the recorder, not an in-memory
-flag: with no prior statistics it backfills ``BACKFILL_MONTHS`` of history
-(once), and thereafter fetches incrementally — so restarts are cheap and the
-cumulative statistics stay forward-only. Every meter on the account is fetched
-and imported under its own ``statistic_id``; the coordinator's ``data`` maps
-each meter id to its latest reading, used by the informational sensors.
+Each cycle fetches usage per meter and imports it into Home Assistant long-term
+statistics. The download window is derived from the recorder (no in-memory flag):
+with no prior statistics it backfills ``BACKFILL_MONTHS`` of history once, and
+thereafter fetches incrementally but always covers the current billing cycle so
+cycle-to-date totals are correct. Plans are resolved per meter (a subscriber can
+be on different plans per meter); an account-wide options value overrides
+detection. The coordinator's ``data`` maps each meter id to its ``MeterData``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from enovapower import (
     AsyncEnovaClient,
+    BillingPeriod,
     EnovaAuthError,
     EnovaError,
     TariffRate,
@@ -35,21 +36,17 @@ from .const import (
     DOMAIN,
     LOGGER,
     PLAN_TIERED,
-    PLAN_TOU,
     RECENT_DAYS,
     UPDATE_INTERVAL,
 )
 from .statistics import (
-    COST_PERIODS,
-    async_import_cost,
-    async_import_statistics,
-    async_import_tiered_cost,
+    TieredRates,
+    async_import_meter,
     async_last_statistic_start,
     consumption_statistic_id,
-    plan_prices,
+    cost_total,
+    season_threshold,
     tiered_rates,
-    tiered_total_cost,
-    total_cost,
 )
 
 if TYPE_CHECKING:
@@ -61,8 +58,11 @@ class MeterData:
     """Per-meter state exposed to sensors."""
 
     latest: UsageReading | None
-    mtd_energy: float  # kWh consumed this calendar month, to the latest day
-    mtd_cost: float | None  # estimated month-to-date cost (CAD), TOU only
+    plan: str  # this meter's active plan
+    cycle_energy: float  # kWh consumed this billing cycle, to the latest day
+    cycle_cost: float | None  # estimated energy cost this cycle to date (CAD)
+    last_bill: BillingPeriod | None  # most recent closed cycle (actual $)
+    threshold: float | None  # current tier-1 kWh cap (Tiered only)
 
 
 def fetch_from_date(last_start: datetime | None, today: date) -> date:
@@ -76,6 +76,17 @@ def fetch_from_date(last_start: datetime | None, today: date) -> date:
     if last_start is None:
         return today - timedelta(days=BACKFILL_MONTHS * 31)
     return min(last_start.date() - timedelta(days=1), today - timedelta(days=RECENT_DAYS))
+
+
+def current_cycle_start(periods: list[BillingPeriod], today: date) -> date:
+    """First day of the current (open) billing cycle.
+
+    The last closed cycle's read date is the day before the current cycle begins;
+    with no billing data, fall back to the calendar month.
+    """
+    if periods:
+        return max(p.end_date for p in periods) + timedelta(days=1)
+    return today.replace(day=1)
 
 
 class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
@@ -96,91 +107,79 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
             config_entry=entry,
         )
         self.client = client
-        # period → cents/kWh for the active plan, refreshed each cycle; read by
-        # the current-rate sensor. Empty until the first successful tariff fetch.
-        self.prices: dict[str, float] = {}
+        # Account-wide scraped tariff rates (all plans), refreshed each cycle and
+        # read by the rate-card and current-rate sensors. Empty until first fetch.
+        self.rates: list[TariffRate] = []
 
-    @property
-    def plan(self) -> str:
-        """Effective pricing plan.
-
-        Priority: an explicit options override, then the plan auto-detected from
-        the portal (``client.plan``, populated during the tariff fetch), then a
-        legacy configured value (entries created before auto-detection), then the
-        default.
-        """
+    def plan_override(self) -> str | None:
+        """Account-wide plan override (options, or a legacy configured value)."""
         entry = self.config_entry
-        return (
-            entry.options.get(CONF_PLAN)
-            or self.client.plan
-            or entry.data.get(CONF_PLAN)
-            or DEFAULT_PLAN
-        )
+        return entry.options.get(CONF_PLAN) or entry.data.get(CONF_PLAN)
+
+    async def _meter_plan(self, meter_id: str) -> str:
+        """Resolve a meter's plan: override, else portal detection, else default."""
+        override = self.plan_override()
+        if override:
+            return override
+        try:
+            return await self.client.get_current_plan(meter_id) or DEFAULT_PLAN
+        except EnovaError as err:
+            LOGGER.warning("Could not detect plan for meter %s: %s", meter_id, err)
+            return DEFAULT_PLAN
 
     async def _async_update_data(self) -> dict[str, MeterData]:
-        """Fetch + import each meter; return latest reading and MTD totals."""
+        """Fetch + import each meter; return per-meter state for the sensors."""
         today = date.today()
-        month_start = today.replace(day=1)
         data: dict[str, MeterData] = {}
         try:
-            rates = await self._fetch_rates(today)
-            self.prices = plan_prices(rates, self.plan)
-            tou_prices = (
-                self.prices
-                if self.plan == PLAN_TOU and set(COST_PERIODS) <= self.prices.keys()
-                else None
-            )
-            tiered = tiered_rates(rates) if self.plan == PLAN_TIERED else None
+            self.rates = await self._fetch_rates(today)
+            tiered = tiered_rates(self.rates)
             for meter_id in self.client.meter_ids:
-                statistic_id = consumption_statistic_id(meter_id)
-                last_start = await async_last_statistic_start(self.hass, statistic_id)
-                # Always cover the current month so month-to-date can be summed.
-                from_date = min(fetch_from_date(last_start, today), month_start)
-                if last_start is None:
-                    LOGGER.debug(
-                        "No prior statistics for meter %s; backfilling from %s",
-                        meter_id,
-                        from_date,
-                    )
-                readings = await self.client.download_usage(
-                    from_date, today, meter_id=meter_id
-                )
-                await async_import_statistics(self.hass, meter_id, readings)
-                if tou_prices:
-                    await async_import_cost(
-                        self.hass, meter_id, readings, tou_prices, CURRENCY
-                    )
-                elif tiered:
-                    await async_import_tiered_cost(
-                        self.hass, meter_id, readings, tiered, CURRENCY
-                    )
-
-                month = [r for r in readings if r.date >= month_start]
-                if tou_prices:
-                    mtd_cost = total_cost(month, tou_prices)
-                elif tiered:
-                    mtd_cost = tiered_total_cost(month, tiered)
-                else:
-                    mtd_cost = None
-                data[meter_id] = MeterData(
-                    latest=max(readings, key=lambda r: r.date) if readings else None,
-                    mtd_energy=sum(r.total for r in month),
-                    mtd_cost=mtd_cost,
-                )
+                data[meter_id] = await self._update_meter(meter_id, today, tiered)
         except EnovaAuthError as err:  # also covers EnovaSessionExpiredError
             raise ConfigEntryAuthFailed(str(err)) from err
         except EnovaError as err:  # also covers EnovaNetworkError + parse/form errors
             raise UpdateFailed(str(err)) from err
-
         return data
 
-    async def _fetch_rates(self, today: date) -> list[TariffRate]:
-        """Current tariff rates for all plans (best effort; empty on failure).
+    async def _update_meter(
+        self, meter_id: str, today: date, tiered: TieredRates | None
+    ) -> MeterData:
+        """Fetch, import, and summarize a single meter."""
+        plan = await self._meter_plan(meter_id)
+        try:
+            periods = await self.client.billing_periods(meter_id)
+        except EnovaError as err:
+            LOGGER.warning("Could not fetch billing cycles for %s: %s", meter_id, err)
+            periods = []
 
-        Reduced to the active plan's period rates for the current-rate sensor,
-        and used for the TOU/Tiered cost estimates. Historical cost uses these
-        current rates/threshold (a documented approximation).
-        """
+        cycle_start = current_cycle_start(periods, today)
+        last_start = await async_last_statistic_start(
+            self.hass, consumption_statistic_id(meter_id)
+        )
+        # Always cover the whole current cycle so cycle-to-date and tier
+        # accumulation are correct.
+        from_date = min(fetch_from_date(last_start, today), cycle_start)
+        if last_start is None:
+            LOGGER.debug("No prior statistics for %s; backfilling from %s", meter_id, from_date)
+
+        readings = await self.client.download_usage(from_date, today, meter_id=meter_id)
+        await async_import_meter(
+            self.hass, meter_id, readings, plan, self.rates, tiered, periods, CURRENCY
+        )
+
+        cycle = [r for r in readings if r.date >= cycle_start]
+        return MeterData(
+            latest=max(readings, key=lambda r: r.date) if readings else None,
+            plan=plan,
+            cycle_energy=sum(r.total for r in cycle),
+            cycle_cost=cost_total(cycle, plan, self.rates, tiered, periods) if cycle else None,
+            last_bill=max(periods, key=lambda p: p.end_date) if periods else None,
+            threshold=season_threshold(today) if plan == PLAN_TIERED else None,
+        )
+
+    async def _fetch_rates(self, today: date) -> list[TariffRate]:
+        """Current tariff rates for all plans (best effort; empty on failure)."""
         try:
             return await self.client.download_tariff(today - timedelta(days=30), today)
         except EnovaError as err:

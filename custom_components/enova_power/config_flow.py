@@ -130,13 +130,9 @@ class EnovaPowerOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
-        # Default to the plan currently in effect — an explicit override, else
-        # the plan auto-detected from the portal (via the coordinator), else the
-        # fallback. Lets the user correct a wrong/undetected detection.
-        coordinator = self.config_entry.runtime_data
-        current = self.config_entry.options.get(CONF_PLAN) or (
-            coordinator.plan if coordinator else DEFAULT_PLAN
-        )
+        # Default to the account-wide plan override if set, else the fallback.
+        # Setting a plan here overrides per-meter auto-detection for all meters.
+        current = self.config_entry.options.get(CONF_PLAN) or DEFAULT_PLAN
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(

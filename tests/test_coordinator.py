@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -44,23 +44,30 @@ def _coordinator(hass, *, detected=None, options=None, data=None):
     entry = MockConfigEntry(domain=DOMAIN, data=data or {}, options=options or {})
     entry.add_to_hass(hass)
     client = MagicMock()
-    client.plan = detected
+    client.get_current_plan = AsyncMock(return_value=detected)
     return EnovaPowerCoordinator(hass, entry, client)
 
 
-async def test_plan_uses_detected_when_no_override(hass: HomeAssistant) -> None:
-    assert _coordinator(hass, detected="ulo").plan == "ulo"
+async def test_plan_override_from_options(hass: HomeAssistant) -> None:
+    assert _coordinator(hass, options={CONF_PLAN: "tiered"}).plan_override() == "tiered"
 
 
-async def test_plan_options_override_wins(hass: HomeAssistant) -> None:
+async def test_plan_override_from_legacy_data(hass: HomeAssistant) -> None:
+    assert _coordinator(hass, data={CONF_PLAN: "ulo"}).plan_override() == "ulo"
+
+
+async def test_plan_override_none(hass: HomeAssistant) -> None:
+    assert _coordinator(hass).plan_override() is None
+
+
+async def test_meter_plan_uses_detection(hass: HomeAssistant) -> None:
+    assert await _coordinator(hass, detected="ulo")._meter_plan("111") == "ulo"
+
+
+async def test_meter_plan_override_wins(hass: HomeAssistant) -> None:
     coord = _coordinator(hass, detected="ulo", options={CONF_PLAN: "tiered"})
-    assert coord.plan == "tiered"
+    assert await coord._meter_plan("111") == "tiered"
 
 
-async def test_plan_defaults_when_undetected(hass: HomeAssistant) -> None:
-    assert _coordinator(hass, detected=None).plan == DEFAULT_PLAN
-
-
-async def test_plan_legacy_data_when_undetected(hass: HomeAssistant) -> None:
-    coord = _coordinator(hass, detected=None, data={CONF_PLAN: "tiered"})
-    assert coord.plan == "tiered"
+async def test_meter_plan_defaults_when_undetected(hass: HomeAssistant) -> None:
+    assert await _coordinator(hass, detected=None)._meter_plan("111") == DEFAULT_PLAN

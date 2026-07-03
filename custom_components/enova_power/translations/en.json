@@ -42,17 +42,18 @@
   },
   "entity": {
     "sensor": {
-      "latest_daily_consumption": {
-        "name": "Latest daily consumption"
-      },
-      "latest_reading_date": {
-        "name": "Latest reading date"
-      },
-      "month_to_date_energy": {
-        "name": "Month-to-date consumption"
-      },
-      "month_to_date_cost": {
-        "name": "Month-to-date cost"
+      "latest_daily_consumption": { "name": "Latest daily consumption" },
+      "latest_reading_date": { "name": "Latest reading date" },
+      "cycle_to_date_consumption": { "name": "Billing cycle consumption" },
+      "cycle_to_date_energy_cost": { "name": "Billing cycle energy cost" },
+      "last_bill_amount": { "name": "Last bill amount" },
+      "active_plan": {
+        "name": "Rate plan",
+        "state": {
+          "time_of_use": "Time-of-Use",
+          "ulo": "Ultra-Low Overnight",
+          "tiered": "Tiered"
+        }
       },
       "current_period": {
         "name": "Current pricing period",
@@ -64,9 +65,21 @@
           "tiered": "Tiered"
         }
       },
-      "current_rate": {
-        "name": "Current rate"
-      }
+      "current_rate": { "name": "Current rate" },
+      "current_tier": {
+        "name": "Current tier",
+        "state": { "tier_1": "Tier 1", "tier_2": "Tier 2" }
+      },
+      "kwh_to_tier_2": { "name": "kWh remaining in Tier 1" },
+      "tou_off_peak_rate": { "name": "TOU off-peak rate" },
+      "tou_mid_peak_rate": { "name": "TOU mid-peak rate" },
+      "tou_on_peak_rate": { "name": "TOU on-peak rate" },
+      "ulo_overnight_rate": { "name": "ULO overnight rate" },
+      "ulo_off_peak_rate": { "name": "ULO off-peak rate" },
+      "ulo_mid_peak_rate": { "name": "ULO mid-peak rate" },
+      "ulo_on_peak_rate": { "name": "ULO on-peak rate" },
+      "tier_1_rate": { "name": "Tier 1 rate" },
+      "tier_2_rate": { "name": "Tier 2 rate" }
     }
   }
 }

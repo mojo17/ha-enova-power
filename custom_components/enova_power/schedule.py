@@ -9,7 +9,7 @@ hardcoded rather than scraped.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from .const import (
     PERIOD_MID_PEAK,
@@ -20,6 +20,21 @@ from .const import (
     PLAN_TIERED,
     PLAN_ULO,
 )
+
+# The meter clock and the portal's own TOU classification use fixed Eastern
+# Standard Time (UTC-5) year-round — NOT DST-observing local time. This was
+# verified by reclassifying hourly intervals and matching the portal's per-day
+# total_on/mid/off_peak exactly. So period classification converts timestamps to
+# this fixed offset before applying the schedule (see period_for_interval).
+EASTERN_FIXED = timezone(timedelta(hours=-5))
+
+
+def period_for_interval(interval_utc: datetime, plan: str) -> str:
+    """Classify a UTC hourly-interval start into its pricing period for ``plan``.
+
+    Converts to fixed EST first so the result matches the portal's own bucketing.
+    """
+    return current_period(interval_utc.astimezone(EASTERN_FIXED), plan)
 
 
 def _easter(year: int) -> date:
