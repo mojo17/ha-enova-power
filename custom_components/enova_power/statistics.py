@@ -9,7 +9,10 @@ meter's fixed-EST hour (verified to match the portal's own TOU totals — see
 account (plan-independent), so a plan change never orphans a bucket; only the
 active ``energy_cost`` series changes which rates it applies. Cost is the energy
 line item only (excludes delivery, regulatory charges, rebates and tax); the
-actual all-in bill is surfaced separately as ``last_bill_amount``.
+actual all-in bill is surfaced separately as ``last_bill_amount``. The portal
+only exposes *current* rates (querying a past range still returns today's
+rates), so cost applies the current rates/threshold to all history — an
+approximation that self-corrects going forward as rates update on May 1 / Nov 1.
 
 External statistics carry an absolute cumulative ``sum``, so imports are
 **forward-only**: the running sum resumes from the last stored point and skips
