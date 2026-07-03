@@ -6,7 +6,7 @@
 
 A Home Assistant integration that reports household electricity consumption from the
 [Enova Power](https://enovapower.com) My Account portal (Kitchener-Waterloo, Ontario). It is
-a thin wrapper over the [`enovapower`](https://github.com/hanihawari/enovapower) library and
+a thin wrapper over the [`enovapower`](https://github.com/mojo17/enovapower) library and
 feeds your hourly usage into Home Assistant **long-term statistics**, so it appears natively
 in the **Energy dashboard** with full history.
 
