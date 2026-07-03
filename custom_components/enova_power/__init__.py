@@ -13,7 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .const import LOGGER
 from .coordinator import EnovaPowerCoordinator
@@ -26,26 +26,39 @@ EnovaPowerConfigEntry = ConfigEntry[EnovaPowerCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -> bool:
     """Set up Enova Power from a config entry."""
-    session = async_get_clientsession(hass)
+    # Dedicated session with an isolated cookie jar — NOT async_get_clientsession.
+    # The portal serves a non-login page (no CSRF token) when the shared jar
+    # already holds an authenticated session cookie from the config flow's login,
+    # which made the setup login fail with "Invalid credentials".
+    session = async_create_clientsession(hass)
     client = AsyncEnovaClient(session=session)
 
+    ok = False
     try:
-        await client.login(entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
-    except EnovaAuthError as err:
-        raise ConfigEntryAuthFailed("Invalid Enova Power credentials") from err
-    except EnovaNetworkError as err:
-        raise ConfigEntryNotReady(f"Cannot reach Enova Power: {err}") from err
+        try:
+            await client.login(entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
+        except EnovaAuthError as err:
+            raise ConfigEntryAuthFailed("Invalid Enova Power credentials") from err
+        except EnovaNetworkError as err:
+            raise ConfigEntryNotReady(f"Cannot reach Enova Power: {err}") from err
 
-    LOGGER.debug("Logged in; %d meter(s) found", len(client.meter_ids))
+        LOGGER.debug("Logged in; %d meter(s) found", len(client.meter_ids))
 
-    # Every statistic/entity is keyed on the meter id; never set up on None.
-    if not client.meter_id:
-        raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
+        # Every statistic/entity is keyed on the meter id; never set up on None.
+        if not client.meter_id:
+            raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
 
-    coordinator = EnovaPowerCoordinator(hass, entry, client)
-    await coordinator.async_config_entry_first_refresh()
+        coordinator = EnovaPowerCoordinator(hass, entry, client)
+        await coordinator.async_config_entry_first_refresh()
+        ok = True
+    finally:
+        # Free the dedicated session on any setup failure (HA retries create a
+        # fresh one); on success it lives until the entry is unloaded.
+        if not ok:
+            await session.close()
 
     entry.runtime_data = coordinator
+    entry.async_on_unload(session.close)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

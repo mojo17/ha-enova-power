@@ -16,7 +16,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .const import CONF_PLAN, DEFAULT_PLAN, DOMAIN, LOGGER, PLANS
 
@@ -48,7 +48,12 @@ class EnovaPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _validate(self, username: str, password: str) -> tuple[str, dict[str, str]]:
         """Try to log in. Return (account_number, errors)."""
-        client = AsyncEnovaClient(session=async_get_clientsession(self.hass))
+        # Use a dedicated session with its own cookie jar — never the shared
+        # async_get_clientsession. The portal returns a non-login page (no CSRF
+        # token) when the jar already holds an authenticated session cookie, so a
+        # jar shared across the config flow and setup makes the second login fail.
+        session = async_create_clientsession(self.hass)
+        client = AsyncEnovaClient(session=session)
         errors: dict[str, str] = {}
         account = username
         try:
@@ -62,7 +67,8 @@ class EnovaPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             LOGGER.exception("Unexpected error validating Enova Power credentials")
             errors["base"] = "unknown"
         finally:
-            await client.close()
+            await client.close()  # clears credentials; won't touch external session
+            await session.close()
         return account, errors
 
     async def async_step_user(
