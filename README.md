@@ -43,7 +43,22 @@ Add the **Enova Power consumption** statistic as a consumption source under
 
 ## Development
 
-Requires Python 3.12+ and Home Assistant's test harness:
+Requires Python 3.14+ (Home Assistant 2026.7+ pins `>=3.14.2`). The helper
+scripts create one virtualenv (`.venv`, gitignored) that both runs the tests and
+serves a live dev instance — using [`uv`](https://docs.astral.sh/uv/) when
+present (it can even fetch Python 3.14 itself), else falling back to `venv`+`pip`:
+
+```bash
+./scripts/setup      # create .venv and install test + runtime deps
+./scripts/develop    # run live HA on http://localhost:8123 with this component
+./scripts/test       # run the pytest suite (mirrors CI); extra args pass through
+```
+
+`scripts/develop` symlinks the integration into a throwaway `config/` dir, so
+code edits take effect on the next HA restart. Only `config/configuration.yaml`
+is tracked — everything HA generates there is ignored.
+
+Prefer to do it by hand:
 
 ```bash
 pip install -r requirements_test.txt

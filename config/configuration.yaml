@@ -1,0 +1,11 @@
+# Minimal Home Assistant config for the local dev instance (scripts/develop).
+# Only this file and .gitignore are committed; everything else HA writes into
+# this directory (.storage/, the recorder DB, logs, the runtime symlink) is
+# ignored via config/.gitignore.
+default_config:
+
+logger:
+  default: warning
+  logs:
+    custom_components.enova_power: debug
+    enovapower: debug

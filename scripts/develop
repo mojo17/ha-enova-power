@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run a live Home Assistant dev instance with this integration loaded.
+#
+# The integration is *symlinked* into ./config/custom_components, so edits in
+# custom_components/enova_power/ take effect on the next HA restart (Ctrl+C, then
+# re-run) — no copying to a box, no reinstall. First launch writes default
+# config/.storage into ./config using our config/configuration.yaml.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ ! -d ".venv" ]; then
+  echo "No .venv found — run ./scripts/setup first." >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+
+mkdir -p config/custom_components
+# -s symbolic, -f replace existing, -n don't descend into an existing symlinked
+# dir. Target is relative to the link's own directory (config/custom_components).
+ln -sfn ../../custom_components/enova_power config/custom_components/enova_power
+
+echo "Starting Home Assistant → http://localhost:8123  (Ctrl+C to stop)"
+exec hass --config config --debug

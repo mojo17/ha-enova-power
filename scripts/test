@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run the test suite in the dev venv (mirrors the CI `tests` job).
+# Extra args pass through, e.g. ./scripts/test -k config_flow -x
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ ! -d ".venv" ]; then
+  echo "No .venv found — run ./scripts/setup first." >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+exec pytest --cov=custom_components.enova_power --cov-report=term-missing "$@"

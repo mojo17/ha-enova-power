@@ -1,0 +1,6 @@
+# HA generates logs, a recorder DB, .storage/, .HA_VERSION, and the runtime
+# custom_components symlink in here. Ignore everything…
+*
+# …except the files we intentionally track.
+!.gitignore
+!configuration.yaml
