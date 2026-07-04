@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/mojo17/ha-enova-power/issues",
   "loggers": ["enovapower"],
   "requirements": ["enovapower==0.10.0"],
-  "version": "0.5.4"
+  "version": "0.5.5"
 }
