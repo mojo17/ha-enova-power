@@ -35,6 +35,7 @@ coordinator detect that case and refetch full history once so it backfills.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -46,7 +47,6 @@ from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    clear_statistics,
     get_last_statistics,
 )
 from homeassistant.const import UnitOfEnergy
@@ -484,10 +484,18 @@ async def async_rebuild_statistics(hass: HomeAssistant, meter_ids: list[str]) ->
 
     Runs before the coordinator's first refresh; the cleared series then show
     up as missing, which triggers the existing full-history backfill path.
+
+    Clearing must run on the recorder's own thread (its meta manager asserts
+    this), so it is queued via ``async_clear_statistics`` and awaited through
+    the ``on_done`` callback — the wait guarantees the first refresh cannot
+    observe pre-clear rows and skip the backfill.
     """
     ids = [sid for meter_id in meter_ids for sid in rebuild_statistic_ids(meter_id)]
-    instance = get_instance(hass)
-    await instance.async_add_executor_job(clear_statistics, instance, ids)
+    done = asyncio.Event()
+    get_instance(hass).async_clear_statistics(
+        ids, on_done=lambda: hass.loop.call_soon_threadsafe(done.set)
+    )
+    await done.wait()
     LOGGER.info("Cleared %d statistics series for a format rebuild", len(ids))
 
 

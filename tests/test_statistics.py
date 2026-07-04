@@ -297,25 +297,23 @@ async def test_rebuild_ids_cover_everything_but_consumption() -> None:
 
 
 async def test_async_rebuild_clears_all_meters(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
     cleared: list[str] = []
 
-    async def fake_executor_job(func, *args):
-        return func(*args)
+    class FakeRecorder:
+        # Mirrors Recorder.async_clear_statistics: queues the clear on the
+        # recorder thread and reports completion through on_done.
+        def async_clear_statistics(self, ids, *, on_done=None):
+            cleared.extend(ids)
+            if on_done is not None:
+                on_done()
 
-    monkeypatch.setattr(
-        statistics_module,
-        "get_instance",
-        lambda hass: type(
-            "FakeRecorder", (), {"async_add_executor_job": staticmethod(fake_executor_job)}
-        )(),
-    )
-    monkeypatch.setattr(
-        statistics_module,
-        "clear_statistics",
-        lambda inst, ids: cleared.extend(ids),
-    )
+    monkeypatch.setattr(statistics_module, "get_instance", lambda hass: FakeRecorder())
+    fake_hass = SimpleNamespace(loop=asyncio.get_running_loop())
 
-    await statistics_module.async_rebuild_statistics(None, ["111", "222"])
+    await statistics_module.async_rebuild_statistics(fake_hass, ["111", "222"])
 
     assert len(cleared) == 44
     assert bucket_statistic_id("111", "tier1") in cleared

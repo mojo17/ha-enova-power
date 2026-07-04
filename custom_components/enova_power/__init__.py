@@ -30,53 +30,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -
     # Dedicated session with an isolated cookie jar — NOT async_get_clientsession.
     # The portal serves a non-login page (no CSRF token) when the shared jar
     # already holds an authenticated session cookie from the config flow's login,
-    # which made the setup login fail with "Invalid credentials".
+    # which made the setup login fail with "Invalid credentials". HA closes the
+    # session itself (auto_cleanup): on unload, and on any failed setup — never
+    # close it here, that trips the "integration closes the session" warning.
     session = async_create_clientsession(hass)
     client = AsyncEnovaClient(session=session)
 
-    ok = False
     try:
-        try:
-            await client.login(entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
-        except EnovaAuthError as err:
-            raise ConfigEntryAuthFailed("Invalid Enova Power credentials") from err
-        except EnovaNetworkError as err:
-            raise ConfigEntryNotReady(f"Cannot reach Enova Power: {err}") from err
+        await client.login(entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
+    except EnovaAuthError as err:
+        raise ConfigEntryAuthFailed("Invalid Enova Power credentials") from err
+    except EnovaNetworkError as err:
+        raise ConfigEntryNotReady(f"Cannot reach Enova Power: {err}") from err
 
-        LOGGER.debug("Logged in; %d meter(s) found", len(client.meter_ids))
+    LOGGER.debug("Logged in; %d meter(s) found", len(client.meter_ids))
 
-        # Every statistic/entity is keyed on the meter id; never set up on None.
-        if not client.meter_id:
-            raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
+    # Every statistic/entity is keyed on the meter id; never set up on None.
+    if not client.meter_id:
+        raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
 
-        # One-time statistics-format rebuild: clear outdated series before the
-        # first refresh so the missing-series check backfills them in the new
-        # format (imports are forward-only; granularity can't change in place).
-        # Runs before the update listener is registered, so the entry update
-        # below does not trigger a reload.
-        if entry.data.get(CONF_STATS_VERSION, 1) < STATS_VERSION:
-            LOGGER.info(
-                "Statistics format changed (v%s -> v%s); rebuilding bucket and "
-                "cost series at hourly granularity",
-                entry.data.get(CONF_STATS_VERSION, 1),
-                STATS_VERSION,
-            )
-            await async_rebuild_statistics(hass, client.meter_ids)
-            hass.config_entries.async_update_entry(
-                entry, data={**entry.data, CONF_STATS_VERSION: STATS_VERSION}
-            )
+    # One-time statistics-format rebuild: clear outdated series before the
+    # first refresh so the missing-series check backfills them in the new
+    # format (imports are forward-only; granularity can't change in place).
+    # Runs before the update listener is registered, so the entry update
+    # below does not trigger a reload.
+    if entry.data.get(CONF_STATS_VERSION, 1) < STATS_VERSION:
+        LOGGER.info(
+            "Statistics format changed (v%s -> v%s); rebuilding bucket and "
+            "cost series at hourly granularity",
+            entry.data.get(CONF_STATS_VERSION, 1),
+            STATS_VERSION,
+        )
+        await async_rebuild_statistics(hass, client.meter_ids)
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_STATS_VERSION: STATS_VERSION}
+        )
 
-        coordinator = EnovaPowerCoordinator(hass, entry, client)
-        await coordinator.async_config_entry_first_refresh()
-        ok = True
-    finally:
-        # Free the dedicated session on any setup failure (HA retries create a
-        # fresh one); on success it lives until the entry is unloaded.
-        if not ok:
-            await session.close()
+    coordinator = EnovaPowerCoordinator(hass, entry, client)
+    await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = coordinator
-    entry.async_on_unload(session.close)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
