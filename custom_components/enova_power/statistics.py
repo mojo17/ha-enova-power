@@ -3,6 +3,13 @@
 Energy data is historical and lagged, so it belongs in external statistics (not
 a live sensor): this backfills the Energy dashboard with real history.
 
+All series are **hourly** — the source's own resolution (the portal publishes
+``h01``–``h24`` per day) and the finest granularity long-term statistics can
+hold — so hourly charts attribute buckets and costs to the hours the energy
+was used. ``STATS_VERSION`` tracks this format: bumping it makes setup clear
+and rebuild the affected series from a full re-download (imports are
+forward-only, so a granularity change can't be fixed in place).
+
 Buckets are **usage classifications**, computed from the hourly intervals by the
 meter's fixed-EST hour (verified to match the portal's own TOU totals — see
 ``schedule.period_for_interval``). All plan schemes are classified for every
@@ -39,6 +46,7 @@ from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
+    clear_statistics,
     get_last_statistics,
 )
 from homeassistant.const import UnitOfEnergy
@@ -164,29 +172,26 @@ def season_threshold(d: date) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Classification → daily bucket points
+# Classification → hourly bucket points
 # --------------------------------------------------------------------------- #
 
 
-def _period_daily(
+def _period_hourly(
     readings: Iterable[UsageReading], plan: str
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """``{period: [(day_start, kWh)]}`` classifying each hour by fixed-EST time.
+    """``{period: [(hour_start, kWh)]}`` classifying each hour by fixed-EST time.
 
-    ``plan`` selects the schedule (TOU vs ULO). The day start is the reading's
-    first interval (``h01``), used as the daily timestamp for every period.
+    ``plan`` selects the schedule (TOU vs ULO). Points keep the source's hourly
+    granularity — the same resolution as the consumption series — so charts
+    attribute each bucket's energy to the hour it was actually used.
     """
-    per_period: dict[str, dict[datetime, float]] = defaultdict(lambda: defaultdict(float))
+    per_period: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     for reading in readings:
-        intervals = reading.intervals()
-        if not intervals:
-            continue
-        day_start = intervals[0][0]
-        for utc_dt, kwh in intervals:
+        for utc_dt, kwh in reading.intervals():
             if kwh is None:
                 continue
-            per_period[period_for_interval(utc_dt, plan)][day_start] += kwh
-    return {period: sorted(days.items()) for period, days in per_period.items()}
+            per_period[period_for_interval(utc_dt, plan)].append((utc_dt, kwh))
+    return {period: sorted(points) for period, points in per_period.items()}
 
 
 def _cycle_key(d: date, periods: list[BillingPeriod]) -> tuple:
@@ -197,38 +202,42 @@ def _cycle_key(d: date, periods: list[BillingPeriod]) -> tuple:
     return ("month", d.year, d.month)
 
 
-def _tier_daily(
+def _tier_hourly(
     readings: Iterable[UsageReading],
     periods: list[BillingPeriod],
     threshold_of: Callable[[date], float] = season_threshold,
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """``{'tier1'/'tier2': [(day_start, kWh)]}`` — cumulative per billing cycle.
+    """``{'tier1'/'tier2': [(hour_start, kWh)]}`` — cumulative per billing cycle.
 
-    Within each cycle the first ``threshold_of(date)`` kWh bill at Tier 1 and the
-    rest at Tier 2. Cycles come from the billing report; days outside a known
-    cycle fall back to their calendar month.
+    Within each cycle the first ``threshold_of(date)`` kWh bill at Tier 1 and
+    the rest at Tier 2, accumulated hour by hour so the threshold crossing
+    lands in the hour it actually happens. Hours contributing nothing to a
+    tier are omitted (an absent statistics row and a zero row sum the same).
+    Cycles come from the billing report; days outside a known cycle fall back
+    to their calendar month.
     """
     by_cycle: dict[tuple, list[tuple[datetime, float, date]]] = defaultdict(list)
     for reading in readings:
-        intervals = reading.intervals()
-        if not intervals:
-            continue
-        by_cycle[_cycle_key(reading.date, periods)].append(
-            (intervals[0][0], reading.total, reading.date)
-        )
+        for utc_dt, kwh in reading.intervals():
+            if kwh is None:
+                continue
+            by_cycle[_cycle_key(reading.date, periods)].append((utc_dt, kwh, reading.date))
 
     tier1: list[tuple[datetime, float]] = []
     tier2: list[tuple[datetime, float]] = []
-    for days in by_cycle.values():
+    for hours in by_cycle.values():
         cumulative = 0.0
-        for day_start, day_kwh, d in sorted(days):
+        for hour_start, kwh, d in sorted(hours):
             threshold = threshold_of(d)
             below_before = min(cumulative, threshold)
-            below_after = min(cumulative + day_kwh, threshold)
+            below_after = min(cumulative + kwh, threshold)
             t1 = below_after - below_before
-            tier1.append((day_start, t1))
-            tier2.append((day_start, day_kwh - t1))
-            cumulative += day_kwh
+            t2 = kwh - t1
+            if t1 > 0.0:
+                tier1.append((hour_start, t1))
+            if t2 > 0.0:
+                tier2.append((hour_start, t2))
+            cumulative += kwh
     return {"tier1": sorted(tier1), "tier2": sorted(tier2)}
 
 
@@ -236,9 +245,9 @@ def bucket_points(
     readings: list[UsageReading], periods: list[BillingPeriod]
 ) -> dict[str, list[tuple[datetime, float]]]:
     """All bucket series keyed by statistic key (``tou_*``/``ulo_*``/``tier1/2``)."""
-    tou = _period_daily(readings, PLAN_TOU)
-    ulo = _period_daily(readings, PLAN_ULO)
-    tiers = _tier_daily(readings, periods)
+    tou = _period_hourly(readings, PLAN_TOU)
+    ulo = _period_hourly(readings, PLAN_ULO)
+    tiers = _tier_hourly(readings, periods)
     result: dict[str, list[tuple[datetime, float]]] = {}
     for key, period in TOU_BUCKETS.items():
         result[key] = tou.get(period, [])
@@ -254,52 +263,52 @@ def bucket_points(
 # --------------------------------------------------------------------------- #
 
 
-def _period_cost_daily(
+def _period_cost_hourly(
     readings: list[UsageReading], plan: str, prices: dict[str, float]
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """``{period: [(day_start, dollars)]}`` for a TOU/ULO scheme (priced periods only)."""
+    """``{period: [(hour_start, dollars)]}`` for a TOU/ULO scheme (priced periods only)."""
     result: dict[str, list[tuple[datetime, float]]] = {}
-    for period, points in _period_daily(readings, plan).items():
+    for period, points in _period_hourly(readings, plan).items():
         rate = prices.get(period)
         if rate is not None:
-            result[period] = [(day, kwh * rate / 100.0) for day, kwh in points]
+            result[period] = [(start, kwh * rate / 100.0) for start, kwh in points]
     return result
 
 
-def _tier_cost_daily(
+def _tier_cost_hourly(
     readings: list[UsageReading], tiered: TieredRates, periods: list[BillingPeriod]
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """``{'tier1'/'tier2': [(day_start, dollars)]}`` for the Tiered scheme."""
-    daily = _tier_daily(readings, periods)
+    """``{'tier1'/'tier2': [(hour_start, dollars)]}`` for the Tiered scheme."""
+    hourly = _tier_hourly(readings, periods)
     return {
-        tier: [(day, kwh * rate / 100.0) for day, kwh in daily[tier]]
+        tier: [(start, kwh * rate / 100.0) for start, kwh in hourly[tier]]
         for tier, rate in (("tier1", tiered.tier1), ("tier2", tiered.tier2))
     }
 
 
-def _sum_by_day(
+def _sum_by_start(
     series: Iterable[list[tuple[datetime, float]]],
 ) -> list[tuple[datetime, float]]:
-    """Merge per-bucket daily points into one total-per-day series."""
-    by_day: dict[datetime, float] = defaultdict(float)
+    """Merge per-bucket points into one total-per-timestamp series."""
+    by_start: dict[datetime, float] = defaultdict(float)
     for points in series:
-        for day_start, value in points:
-            by_day[day_start] += value
-    return sorted(by_day.items())
+        for start, value in points:
+            by_start[start] += value
+    return sorted(by_start.items())
 
 
 def _time_cost_points(
     readings: list[UsageReading], plan: str, prices: dict[str, float]
 ) -> list[tuple[datetime, float]]:
-    """Daily energy cost (dollars) for a TOU/ULO scheme: Σ period_kWh × rate."""
-    return _sum_by_day(_period_cost_daily(readings, plan, prices).values())
+    """Hourly energy cost (dollars) for a TOU/ULO scheme: hour_kWh × its rate."""
+    return _sum_by_start(_period_cost_hourly(readings, plan, prices).values())
 
 
 def _tier_cost_points(
     readings: list[UsageReading], tiered: TieredRates, periods: list[BillingPeriod]
 ) -> list[tuple[datetime, float]]:
-    """Daily energy cost (dollars) for the Tiered plan."""
-    return _sum_by_day(_tier_cost_daily(readings, tiered, periods).values())
+    """Hourly energy cost (dollars) for the Tiered plan."""
+    return _sum_by_start(_tier_cost_hourly(readings, tiered, periods).values())
 
 
 def bucket_cost_points(
@@ -308,7 +317,7 @@ def bucket_cost_points(
     tiered: TieredRates | None,
     periods: list[BillingPeriod],
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """Daily energy-cost points per bucket key, at each scheme's current rates.
+    """Hourly energy-cost points per bucket key, at each scheme's current rates.
 
     Every scheme is priced regardless of the active plan (like the kWh buckets),
     so a scheme's bucket costs always sum to its ``cost_if_*`` series. Buckets
@@ -316,12 +325,12 @@ def bucket_cost_points(
     """
     result: dict[str, list[tuple[datetime, float]]] = {}
     for plan, buckets in ((PLAN_TOU, TOU_BUCKETS), (PLAN_ULO, ULO_BUCKETS)):
-        cost_daily = _period_cost_daily(readings, plan, plan_prices(rates, plan))
+        cost_hourly = _period_cost_hourly(readings, plan, plan_prices(rates, plan))
         for key, period in buckets.items():
-            if period in cost_daily:
-                result[key] = cost_daily[period]
+            if period in cost_hourly:
+                result[key] = cost_hourly[period]
     if tiered:
-        result.update(_tier_cost_daily(readings, tiered, periods))
+        result.update(_tier_cost_hourly(readings, tiered, periods))
     return result
 
 
@@ -446,6 +455,40 @@ def expected_statistic_ids(
     if tiered:
         ids.append(cost_if_statistic_id(meter_id, PLAN_TIERED))
     return ids
+
+
+# Statistics format version, stamped into the config entry after a rebuild.
+# Bump when the shape of already-imported series changes. Version 2 = hourly
+# bucket/cost granularity (version 1 imported one point per day).
+STATS_VERSION = 2
+
+
+def rebuild_statistic_ids(meter_id: str) -> list[str]:
+    """The statistic ids cleared for a format rebuild.
+
+    Everything except the consumption series, which has been hourly from the
+    start and keeps its history.
+    """
+    ids = [bucket_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
+    ids += [bucket_cost_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
+    ids.append(cost_statistic_id(meter_id))
+    ids += [
+        cost_if_statistic_id(meter_id, plan)
+        for plan in (PLAN_TOU, PLAN_ULO, PLAN_TIERED)
+    ]
+    return ids
+
+
+async def async_rebuild_statistics(hass: HomeAssistant, meter_ids: list[str]) -> None:
+    """Clear outdated-format series so the next refresh re-imports them in full.
+
+    Runs before the coordinator's first refresh; the cleared series then show
+    up as missing, which triggers the existing full-history backfill path.
+    """
+    ids = [sid for meter_id in meter_ids for sid in rebuild_statistic_ids(meter_id)]
+    instance = get_instance(hass)
+    await instance.async_add_executor_job(clear_statistics, instance, ids)
+    LOGGER.info("Cleared %d statistics series for a format rebuild", len(ids))
 
 
 def _missing_series(hass: HomeAssistant, ids: list[str]) -> list[str]:

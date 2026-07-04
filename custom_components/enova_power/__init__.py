@@ -15,8 +15,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from .const import LOGGER
+from .const import CONF_STATS_VERSION, LOGGER
 from .coordinator import EnovaPowerCoordinator
+from .statistics import STATS_VERSION, async_rebuild_statistics
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -47,6 +48,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -
         # Every statistic/entity is keyed on the meter id; never set up on None.
         if not client.meter_id:
             raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
+
+        # One-time statistics-format rebuild: clear outdated series before the
+        # first refresh so the missing-series check backfills them in the new
+        # format (imports are forward-only; granularity can't change in place).
+        # Runs before the update listener is registered, so the entry update
+        # below does not trigger a reload.
+        if entry.data.get(CONF_STATS_VERSION, 1) < STATS_VERSION:
+            LOGGER.info(
+                "Statistics format changed (v%s -> v%s); rebuilding bucket and "
+                "cost series at hourly granularity",
+                entry.data.get(CONF_STATS_VERSION, 1),
+                STATS_VERSION,
+            )
+            await async_rebuild_statistics(hass, client.meter_ids)
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_STATS_VERSION: STATS_VERSION}
+            )
 
         coordinator = EnovaPowerCoordinator(hass, entry, client)
         await coordinator.async_config_entry_first_refresh()

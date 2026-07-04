@@ -23,8 +23,8 @@ from custom_components.enova_power.statistics import (
     _build_statistics,
     _cycle_key,
     _missing_series,
-    _period_daily,
-    _tier_daily,
+    _period_hourly,
+    _tier_hourly,
     bucket_cost_points,
     bucket_cost_statistic_id,
     bucket_points,
@@ -36,6 +36,7 @@ from custom_components.enova_power.statistics import (
     cost_total,
     expected_statistic_ids,
     plan_prices,
+    rebuild_statistic_ids,
     season_threshold,
     tiered_rates,
 )
@@ -105,21 +106,29 @@ async def test_season_threshold() -> None:
 # --- classification (fixed-EST) --------------------------------------------- #
 
 
-async def test_period_daily_tou_summer_weekday() -> None:
+async def test_period_hourly_tou_summer_weekday() -> None:
     # 2026-06-01 is a Monday. h01=00:00 EST (off), h09=08:00 (mid), h13=12:00 (on).
     r = _reading(date(2026, 6, 1), h01=1.0, h09=3.0, h13=2.0)
-    daily = _period_daily([r], PLAN_TOU)
-    assert daily[PERIOD_OFF_PEAK][0][1] == 1.0
-    assert daily[PERIOD_MID_PEAK][0][1] == 3.0
-    assert daily[PERIOD_ON_PEAK][0][1] == 2.0
+    hourly = _period_hourly([r], PLAN_TOU)
+    # Points are hourly, timestamped at the interval start (fixed EST → UTC).
+    assert hourly[PERIOD_OFF_PEAK] == [(datetime(2026, 6, 1, 5, tzinfo=timezone.utc), 1.0)]
+    assert hourly[PERIOD_MID_PEAK] == [(datetime(2026, 6, 1, 13, tzinfo=timezone.utc), 3.0)]
+    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 17, tzinfo=timezone.utc), 2.0)]
 
 
-async def test_period_daily_ulo_overnight() -> None:
+async def test_period_hourly_ulo_overnight() -> None:
     # h02 = 01:00 EST → ULO overnight (23:00-07:00); h18 = 17:00 → ULO on-peak (16-21).
     r = _reading(date(2026, 6, 1), h02=4.0, h18=5.0)
-    daily = _period_daily([r], PLAN_ULO)
-    assert daily[PERIOD_ULO_OVERNIGHT][0][1] == 4.0
-    assert daily[PERIOD_ON_PEAK][0][1] == 5.0
+    hourly = _period_hourly([r], PLAN_ULO)
+    assert hourly[PERIOD_ULO_OVERNIGHT] == [(datetime(2026, 6, 1, 6, tzinfo=timezone.utc), 4.0)]
+    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 22, tzinfo=timezone.utc), 5.0)]
+
+
+async def test_period_hourly_keeps_hours_separate() -> None:
+    # Two off-peak hours on the same day stay two points — no day aggregation.
+    r = _reading(date(2026, 6, 1), h01=1.0, h02=2.0)
+    hourly = _period_hourly([r], PLAN_TOU)
+    assert [kwh for _, kwh in hourly[PERIOD_OFF_PEAK]] == [1.0, 2.0]
 
 
 async def test_bucket_points_has_all_keys() -> None:
@@ -139,25 +148,39 @@ async def test_cycle_key_uses_billing_period() -> None:
     assert _cycle_key(date(2026, 8, 1), periods) == ("month", 2026, 8)
 
 
-async def test_tier_daily_crosses_threshold_in_cycle() -> None:
+async def test_tier_hourly_crosses_threshold_in_cycle() -> None:
     periods = [BillingPeriod(date(2026, 5, 31), date(2026, 6, 30), 30, 0.0, 0.0)]
     readings = [
         _reading(date(2026, 6, 1), h13=500.0),  # under 600
         _reading(date(2026, 6, 2), h13=200.0),  # crosses 600 → 100 t1 + 100 t2
     ]
-    tiers = _tier_daily(readings, periods)
+    tiers = _tier_hourly(readings, periods)
     assert [k for _, k in tiers["tier1"]] == pytest.approx([500.0, 100.0])
-    assert [k for _, k in tiers["tier2"]] == pytest.approx([0.0, 100.0])
+    # Zero-contribution hours are omitted: tier2 only starts at the crossing.
+    assert tiers["tier2"] == [(datetime(2026, 6, 2, 17, tzinfo=timezone.utc), 100.0)]
+
+
+async def test_tier_hourly_splits_within_a_day() -> None:
+    # The crossing lands in the exact hour it happens, not smeared over the day.
+    periods = [BillingPeriod(date(2026, 5, 31), date(2026, 6, 30), 30, 0.0, 0.0)]
+    readings = [_reading(date(2026, 6, 1), h01=590.0, h02=20.0, h03=5.0)]
+    tiers = _tier_hourly(readings, periods)
+    assert [k for _, k in tiers["tier1"]] == pytest.approx([590.0, 10.0])
+    assert [k for _, k in tiers["tier2"]] == pytest.approx([10.0, 5.0])
+    assert tiers["tier2"][0][0] == datetime(2026, 6, 1, 6, tzinfo=timezone.utc)  # h02
 
 
 # --- cost ------------------------------------------------------------------- #
 
 
-async def test_cost_points_tou() -> None:
+async def test_cost_points_tou_hourly() -> None:
     r = _reading(date(2026, 6, 1), h01=10.0, h13=5.0)  # off 10, on 5
     points = cost_points([r], PLAN_TOU, TOU_RATES, None, [])
-    # (10 × 9.8 + 5 × 20.3) / 100 = (98 + 101.5)/100 = 1.995
-    assert points[0][1] == pytest.approx(1.995)
+    # One point per hour: 10 × 9.8¢ at h01, 5 × 20.3¢ at h13.
+    assert points == [
+        (datetime(2026, 6, 1, 5, tzinfo=timezone.utc), pytest.approx(0.98)),
+        (datetime(2026, 6, 1, 17, tzinfo=timezone.utc), pytest.approx(1.015)),
+    ]
 
 
 async def test_cost_total_tiered() -> None:
@@ -197,16 +220,16 @@ async def test_bucket_cost_points_tiers() -> None:
     ]
     buckets = bucket_cost_points(readings, [], TieredRates(tier1=10.0, tier2=20.0), periods)
     assert [c for _, c in buckets["tier1"]] == pytest.approx([50.0, 10.0])
-    assert [c for _, c in buckets["tier2"]] == pytest.approx([0.0, 20.0])
+    assert [c for _, c in buckets["tier2"]] == pytest.approx([20.0])
 
 
 async def test_bucket_costs_sum_to_scheme_cost() -> None:
-    # A scheme's bucket costs must always sum to its cost series (per day).
+    # A scheme's bucket costs must always sum to its cost series.
     r = _reading(date(2026, 6, 1), h01=10.0, h09=3.0, h13=5.0)
     buckets = bucket_cost_points([r], TOU_RATES, None, [])
     bucket_total = sum(cost for points in buckets.values() for _, cost in points)
-    (day_point,) = cost_points([r], PLAN_TOU, TOU_RATES, None, [])
-    assert bucket_total == pytest.approx(day_point[1])
+    scheme_total = sum(cost for _, cost in cost_points([r], PLAN_TOU, TOU_RATES, None, []))
+    assert bucket_total == pytest.approx(scheme_total)
 
 
 # --- upgrade detection (expected vs stored series) ---------------------------- #
@@ -253,6 +276,50 @@ async def test_missing_series(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     ids = ["enova_power:energy_consumption_111", "enova_power:cost_tou_on_peak_111"]
     assert _missing_series(None, ids) == ["enova_power:cost_tou_on_peak_111"]
+
+
+# --- statistics-format rebuild ------------------------------------------------ #
+
+
+async def test_rebuild_ids_cover_everything_but_consumption() -> None:
+    ids = rebuild_statistic_ids("111")
+    # 9 kWh buckets + 9 cost buckets + energy_cost + 3 cost_if = 22 series.
+    assert len(ids) == 22
+    assert consumption_statistic_id("111") not in ids  # hourly since v1: keep it
+    assert bucket_statistic_id("111", "tou_on_peak") in ids
+    assert bucket_cost_statistic_id("111", "tier2") in ids
+    assert cost_statistic_id("111") in ids
+    assert cost_if_statistic_id("111", PLAN_ULO) in ids
+    # Rate-gating must not apply here: clear everything that may exist.
+    assert set(ids) >= set(expected_statistic_ids("111", PLAN_TOU, [], None)) - {
+        consumption_statistic_id("111")
+    }
+
+
+async def test_async_rebuild_clears_all_meters(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleared: list[str] = []
+
+    async def fake_executor_job(func, *args):
+        return func(*args)
+
+    monkeypatch.setattr(
+        statistics_module,
+        "get_instance",
+        lambda hass: type(
+            "FakeRecorder", (), {"async_add_executor_job": staticmethod(fake_executor_job)}
+        )(),
+    )
+    monkeypatch.setattr(
+        statistics_module,
+        "clear_statistics",
+        lambda inst, ids: cleared.extend(ids),
+    )
+
+    await statistics_module.async_rebuild_statistics(None, ["111", "222"])
+
+    assert len(cleared) == 44
+    assert bucket_statistic_id("111", "tier1") in cleared
+    assert bucket_cost_statistic_id("222", "ulo_overnight") in cleared
 
 
 # --- forward-only sum ------------------------------------------------------- #

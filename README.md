@@ -87,15 +87,20 @@ the Energy dashboard consumes:
 | Statistic ID | Unit | Series |
 | --- | --- | --- |
 | `enova_power:energy_consumption_<meter>` | kWh | Hourly consumption — the Energy dashboard source. |
-| `enova_power:energy_tou_off_peak_<meter>`, `…tou_mid_peak…`, `…tou_on_peak…` | kWh | Daily usage classified by the Time-of-Use schedule. |
-| `enova_power:energy_ulo_overnight_<meter>`, `…ulo_off_peak…`, `…ulo_mid_peak…`, `…ulo_on_peak…` | kWh | Daily usage classified by the Ultra-Low Overnight schedule. |
-| `enova_power:energy_tier1_<meter>`, `…tier2…` | kWh | Daily usage split at the seasonal Tier 1 threshold (600 kWh/cycle in summer, 1000 in winter), accumulated per real billing cycle. |
-| `enova_power:cost_tou_off_peak_<meter>`, `…cost_ulo_overnight…`, `…cost_tier1…` (one per bucket above) | CAD | Daily energy cost of each usage bucket at that scheme's current rates — pair with its kWh bucket in the [Energy dashboard](#energy-dashboard). A scheme's bucket costs sum to its `cost_if_*` series. |
-| `enova_power:energy_cost_<meter>` | CAD | Daily energy cost under the meter's active plan. |
+| `enova_power:energy_tou_off_peak_<meter>`, `…tou_mid_peak…`, `…tou_on_peak…` | kWh | Hourly usage classified by the Time-of-Use schedule. |
+| `enova_power:energy_ulo_overnight_<meter>`, `…ulo_off_peak…`, `…ulo_mid_peak…`, `…ulo_on_peak…` | kWh | Hourly usage classified by the Ultra-Low Overnight schedule. |
+| `enova_power:energy_tier1_<meter>`, `…tier2…` | kWh | Hourly usage split at the seasonal Tier 1 threshold (600 kWh/cycle in summer, 1000 in winter), accumulated per real billing cycle — the tier crossing lands in the hour it happens. |
+| `enova_power:cost_tou_off_peak_<meter>`, `…cost_ulo_overnight…`, `…cost_tier1…` (one per bucket above) | CAD | Hourly energy cost of each usage bucket at that scheme's current rates — pair with its kWh bucket in the [Energy dashboard](#energy-dashboard). A scheme's bucket costs sum to its `cost_if_*` series. |
+| `enova_power:energy_cost_<meter>` | CAD | Hourly energy cost under the meter's active plan. |
 | `enova_power:cost_if_tou_<meter>`, `…cost_if_ulo…`, `…cost_if_tiered…` | CAD | What the same usage would have cost under each plan — compare them to pick your cheapest plan. |
 
 Semantics worth knowing:
 
+- **Everything is hourly** — the portal's own resolution, and the finest that
+  Home Assistant statistics support — so hourly charts attribute buckets and
+  costs to the hours the energy was used. (Versions before 0.5.5 imported
+  buckets and costs as one point per day; upgrading clears those series and
+  rebuilds them hourly from a one-time full re-download.)
 - **Buckets are usage classifications, not plan state.** All three schemes are classified for
   every account regardless of the active plan, so switching plans never orphans a series —
   only `energy_cost` changes which rates it applies. Hours are classified by the meter's

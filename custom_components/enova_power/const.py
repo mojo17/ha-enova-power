@@ -56,3 +56,7 @@ DEFAULT_PLAN = PLAN_TOU
 
 # Cost statistics are reported in Canadian dollars.
 CURRENCY = "CAD"
+
+# Config-entry data key recording which statistics format the entry's series
+# were last imported with (see statistics.STATS_VERSION).
+CONF_STATS_VERSION = "stats_version"
