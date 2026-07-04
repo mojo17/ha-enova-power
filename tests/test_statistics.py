@@ -452,6 +452,33 @@ async def test_import_series_none_when_series_empty(
     assert await _async_import_series(None, "enova_power:x", "x", [], "kWh") is None
 
 
+async def test_import_series_metadata_uses_mean_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # has_mean is deprecated (removal per HA 2026.11 warning); the metadata
+    # must carry mean_type instead.
+    from homeassistant.components.recorder.models import StatisticMeanType
+
+    captured: dict = {}
+
+    async def fake_last_row(hass, statistic_id):
+        return None
+
+    monkeypatch.setattr(statistics_module, "_async_last_row", fake_last_row)
+    monkeypatch.setattr(
+        statistics_module,
+        "async_add_external_statistics",
+        lambda hass, metadata, stats: captured.update(metadata),
+    )
+
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    await _async_import_series(None, "enova_power:x", "x", [(base, 1.0)], "kWh")
+
+    assert captured["mean_type"] == StatisticMeanType.NONE
+    assert "has_mean" not in captured
+    assert captured["has_sum"] is True
+
+
 async def test_import_meter_writes_bucket_costs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

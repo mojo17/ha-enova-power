@@ -43,7 +43,11 @@ from datetime import date, datetime, timezone
 from enovapower import BillingPeriod, TariffRate, UsageReading
 
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
@@ -540,7 +544,7 @@ async def _async_import_series(
         return base_sum if row else None
 
     metadata = StatisticMetaData(
-        has_mean=False,
+        mean_type=StatisticMeanType.NONE,
         has_sum=True,
         name=name,
         source=DOMAIN,
