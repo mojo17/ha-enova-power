@@ -11,8 +11,11 @@ Two device groups:
 
 The real energy history lives in long-term statistics (see ``statistics.py``);
 these sensors are for at-a-glance use and automations, not energy-dashboard
-meters. Live period/rate refresh on the hour (period boundaries are whole hours)
-and use fixed-EST classification to match how the portal bills.
+meters. The monotonic total-consumption sensor additionally serves as the one
+supported utility_meter source (monthly-or-longer cycles only — data arrives
+days late, so finer cycles misattribute usage). Live period/rate refresh on the
+hour (period boundaries are whole hours) and use fixed-EST classification to
+match how the portal bills.
 """
 
 from __future__ import annotations
@@ -87,6 +90,19 @@ METER_SENSORS: tuple[EnovaSensorDescription, ...] = (
             datetime.combine(d.latest.date, time.min, tzinfo=timezone.utc)
             if d.latest
             else None
+        ),
+    ),
+    # Monotonic lifetime total (the LTS cumulative sum) — the supported source
+    # for utility_meter helpers. Deliberately no state_class: one would make the
+    # recorder build a second, import-time-bucketed kWh series that users could
+    # add to the Energy dashboard and double-count against the external stats.
+    EnovaSensorDescription(
+        key="total_consumption",
+        translation_key="total_consumption",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        value_fn=lambda d: (
+            round(d.lifetime_energy, 3) if d.lifetime_energy is not None else None
         ),
     ),
     EnovaSensorDescription(

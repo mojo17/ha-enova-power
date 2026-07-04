@@ -63,6 +63,7 @@ Each meter gets a **meter device** (`Enova Power meter <meter id>`) with these s
 | --- | --- | --- |
 | Latest daily consumption | kWh | Total for the most recent day the portal has published. |
 | Latest reading date | timestamp | The day that total belongs to. |
+| Total consumption | kWh | Monotonic cumulative usage since first import. The supported source for [utility_meter helpers](#do-i-need-the-utility-meter-helper). |
 | Billing cycle consumption | kWh | Usage so far in the current billing cycle. |
 | Billing cycle energy cost | CAD | Estimated energy cost so far this cycle (energy line item only). |
 | Last bill amount | CAD | The last actual bill; attributes carry the period start/end, days, and kWh. |
@@ -89,6 +90,7 @@ the Energy dashboard consumes:
 | `enova_power:energy_tou_off_peak_<meter>`, `…tou_mid_peak…`, `…tou_on_peak…` | kWh | Daily usage classified by the Time-of-Use schedule. |
 | `enova_power:energy_ulo_overnight_<meter>`, `…ulo_off_peak…`, `…ulo_mid_peak…`, `…ulo_on_peak…` | kWh | Daily usage classified by the Ultra-Low Overnight schedule. |
 | `enova_power:energy_tier1_<meter>`, `…tier2…` | kWh | Daily usage split at the seasonal Tier 1 threshold (600 kWh/cycle in summer, 1000 in winter), accumulated per real billing cycle. |
+| `enova_power:cost_tou_off_peak_<meter>`, `…cost_ulo_overnight…`, `…cost_tier1…` (one per bucket above) | CAD | Daily energy cost of each usage bucket at that scheme's current rates — pair with its kWh bucket in the [Energy dashboard](#energy-dashboard). A scheme's bucket costs sum to its `cost_if_*` series. |
 | `enova_power:energy_cost_<meter>` | CAD | Daily energy cost under the meter's active plan. |
 | `enova_power:cost_if_tou_<meter>`, `…cost_if_ulo…`, `…cost_if_tiered…` | CAD | What the same usage would have cost under each plan — compare them to pick your cheapest plan. |
 
@@ -110,6 +112,52 @@ Semantics worth knowing:
 Under **Settings → Dashboards → Energy → Electricity grid**, add
 `Enova Power consumption (<meter id>)` as a consumption source. To see estimated costs
 alongside, choose to track total costs and pick `Enova Power energy cost (<meter id>)`.
+
+### Tracking usage by pricing period
+
+To break the dashboard down by period instead, add each bucket as its own consumption
+source — e.g. `Enova Power tou off peak (<meter id>)`, `…tou mid peak…`, `…tou on peak…` —
+and give each one its matching cost statistic (`Enova Power tou off peak cost (<meter id>)`,
+…). The same works for the ULO buckets and for `tier1`/`tier2`.
+
+Use **either** the total consumption source **or** one scheme's buckets, not both at once —
+the dashboard sums its sources, so mixing them double-counts your usage. Existing installs
+get full history for the cost buckets automatically: the first refresh after upgrading
+detects the new series and re-imports history once.
+
+## Do I need the utility meter helper?
+
+Probably not. The [utility_meter](https://www.home-assistant.io/integrations/utility_meter/)
+helper accumulates **live** state changes and books each delta at the moment it arrives —
+but Enova publishes usage 1–3 days late, so anything utility_meter derives from these
+sensors is attributed to the import time, not to when the energy was used. The integration
+already provides the correctly-attributed version of everything utility_meter does:
+
+| You want | Use instead of utility_meter |
+| --- | --- |
+| Daily / weekly / monthly totals | The Energy dashboard, or a Statistics Graph card on `enova_power:energy_consumption_<meter>` with the matching period. |
+| Peak / off-peak (tariff) splits | The `tou_*` / `ulo_*` / `tier*` statistics — each hour is classified by when it was actually used. |
+| Billing-cycle tracking | The *Billing cycle consumption* / *energy cost* sensors, aligned to your real meter-read cycles (which utility_meter's fixed cron cycles can't follow). |
+| Cost tracking | The `energy_cost` and `cost_if_*` statistics. |
+
+If you still want one — e.g. for automations that need a month-to-date total as entity
+state — the one supported recipe is:
+
+- **Source:** the **Total consumption** sensor (monotonic, never resets, and immune to
+  billing-cycle boundary gaps).
+- **Cycle:** monthly or longer. Totals will be right overall, give or take the 1–3 day
+  publication lag at cycle boundaries.
+
+What **not** to do:
+
+- **Daily or weekly cycles** — usage lands in the wrong day's bucket, and a catch-up after
+  downtime dumps several days into one.
+- **Tariffs on the utility_meter** (switching its select from *Current pricing period*) —
+  deltas get booked to whatever period is active at import time, not when the energy was
+  used. The `tou_*` / `ulo_*` statistics are the correct version of this.
+- **Other sensors as the source** — *Latest daily consumption* skips days on multi-day
+  catch-ups, and *Billing cycle consumption* silently drops usage published after a bill
+  closes.
 
 ## Notes & limitations
 

@@ -14,9 +14,16 @@ only exposes *current* rates (querying a past range still returns today's
 rates), so cost applies the current rates/threshold to all history — an
 approximation that self-corrects going forward as rates update on May 1 / Nov 1.
 
+Each kWh bucket also gets a paired **cost series** (``cost_<bucket>_<meter>``),
+priced at its scheme's current rates, so buckets can be tracked with costs in
+the Energy dashboard; a scheme's bucket costs sum to its ``cost_if_*`` series.
+
 External statistics carry an absolute cumulative ``sum``, so imports are
 **forward-only**: the running sum resumes from the last stored point and skips
-anything at or before it, which also makes re-imports idempotent.
+anything at or before it, which also makes re-imports idempotent. The flip side
+is that a series added by an upgrade can never fill history older than its
+first import — ``expected_statistic_ids`` + ``async_missing_series`` let the
+coordinator detect that case and refetch full history once so it backfills.
 """
 
 from __future__ import annotations
@@ -63,6 +70,11 @@ def consumption_statistic_id(meter_id: str) -> str:
 def bucket_statistic_id(meter_id: str, key: str) -> str:
     """External statistic_id for a usage bucket (e.g. ``tou_on_peak``, ``tier1``)."""
     return f"{DOMAIN}:energy_{key}_{meter_id}"
+
+
+def bucket_cost_statistic_id(meter_id: str, key: str) -> str:
+    """External statistic_id for a usage bucket's energy cost (CAD)."""
+    return f"{DOMAIN}:cost_{key}_{meter_id}"
 
 
 def cost_statistic_id(meter_id: str) -> str:
@@ -242,31 +254,75 @@ def bucket_points(
 # --------------------------------------------------------------------------- #
 
 
+def _period_cost_daily(
+    readings: list[UsageReading], plan: str, prices: dict[str, float]
+) -> dict[str, list[tuple[datetime, float]]]:
+    """``{period: [(day_start, dollars)]}`` for a TOU/ULO scheme (priced periods only)."""
+    result: dict[str, list[tuple[datetime, float]]] = {}
+    for period, points in _period_daily(readings, plan).items():
+        rate = prices.get(period)
+        if rate is not None:
+            result[period] = [(day, kwh * rate / 100.0) for day, kwh in points]
+    return result
+
+
+def _tier_cost_daily(
+    readings: list[UsageReading], tiered: TieredRates, periods: list[BillingPeriod]
+) -> dict[str, list[tuple[datetime, float]]]:
+    """``{'tier1'/'tier2': [(day_start, dollars)]}`` for the Tiered scheme."""
+    daily = _tier_daily(readings, periods)
+    return {
+        tier: [(day, kwh * rate / 100.0) for day, kwh in daily[tier]]
+        for tier, rate in (("tier1", tiered.tier1), ("tier2", tiered.tier2))
+    }
+
+
+def _sum_by_day(
+    series: Iterable[list[tuple[datetime, float]]],
+) -> list[tuple[datetime, float]]:
+    """Merge per-bucket daily points into one total-per-day series."""
+    by_day: dict[datetime, float] = defaultdict(float)
+    for points in series:
+        for day_start, value in points:
+            by_day[day_start] += value
+    return sorted(by_day.items())
+
+
 def _time_cost_points(
     readings: list[UsageReading], plan: str, prices: dict[str, float]
 ) -> list[tuple[datetime, float]]:
     """Daily energy cost (dollars) for a TOU/ULO scheme: Σ period_kWh × rate."""
-    daily = _period_daily(readings, plan)
-    by_day: dict[datetime, float] = defaultdict(float)
-    for period, points in daily.items():
-        rate = prices.get(period)
-        if rate is None:
-            continue
-        for day_start, kwh in points:
-            by_day[day_start] += kwh * rate
-    return sorted((day, cents / 100.0) for day, cents in by_day.items())
+    return _sum_by_day(_period_cost_daily(readings, plan, prices).values())
 
 
 def _tier_cost_points(
     readings: list[UsageReading], tiered: TieredRates, periods: list[BillingPeriod]
 ) -> list[tuple[datetime, float]]:
     """Daily energy cost (dollars) for the Tiered plan."""
-    daily = _tier_daily(readings, periods)
-    by_day: dict[datetime, float] = defaultdict(float)
-    for tier, rate in (("tier1", tiered.tier1), ("tier2", tiered.tier2)):
-        for day_start, kwh in daily[tier]:
-            by_day[day_start] += kwh * rate
-    return sorted((day, cents / 100.0) for day, cents in by_day.items())
+    return _sum_by_day(_tier_cost_daily(readings, tiered, periods).values())
+
+
+def bucket_cost_points(
+    readings: list[UsageReading],
+    rates: list[TariffRate],
+    tiered: TieredRates | None,
+    periods: list[BillingPeriod],
+) -> dict[str, list[tuple[datetime, float]]]:
+    """Daily energy-cost points per bucket key, at each scheme's current rates.
+
+    Every scheme is priced regardless of the active plan (like the kWh buckets),
+    so a scheme's bucket costs always sum to its ``cost_if_*`` series. Buckets
+    whose rate is unavailable are omitted, not emitted empty.
+    """
+    result: dict[str, list[tuple[datetime, float]]] = {}
+    for plan, buckets in ((PLAN_TOU, TOU_BUCKETS), (PLAN_ULO, ULO_BUCKETS)):
+        cost_daily = _period_cost_daily(readings, plan, plan_prices(rates, plan))
+        for key, period in buckets.items():
+            if period in cost_daily:
+                result[key] = cost_daily[period]
+    if tiered:
+        result.update(_tier_cost_daily(readings, tiered, periods))
+    return result
 
 
 def cost_points(
@@ -353,23 +409,80 @@ async def async_last_statistic_start(
     return _normalize_start(row.get("start")) if row else None
 
 
+def expected_statistic_ids(
+    meter_id: str, plan: str, rates: list[TariffRate], tiered: TieredRates | None
+) -> list[str]:
+    """Every statistic id ``async_import_meter`` would populate given these rates.
+
+    The coordinator compares this against what the recorder already holds to
+    spot series introduced by an upgrade: imports are forward-only, so a new
+    series needs one full-history refetch to backfill (see ``_update_meter``).
+    Cost ids appear only when their scheme's rates resolved, mirroring the
+    import's own gating, so a missing rate can't trigger endless refetches.
+    """
+    ids = [consumption_statistic_id(meter_id)]
+    ids += [bucket_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
+
+    tou_prices = plan_prices(rates, PLAN_TOU)
+    ulo_prices = plan_prices(rates, PLAN_ULO)
+    for prices, buckets in ((tou_prices, TOU_BUCKETS), (ulo_prices, ULO_BUCKETS)):
+        ids += [
+            bucket_cost_statistic_id(meter_id, key)
+            for key, period in buckets.items()
+            if period in prices
+        ]
+    if tiered:
+        ids += [bucket_cost_statistic_id(meter_id, key) for key in TIER_BUCKETS]
+
+    active_priced = (
+        tiered is not None if plan == PLAN_TIERED else bool(plan_prices(rates, plan))
+    )
+    if active_priced:
+        ids.append(cost_statistic_id(meter_id))
+    if tou_prices:
+        ids.append(cost_if_statistic_id(meter_id, PLAN_TOU))
+    if ulo_prices:
+        ids.append(cost_if_statistic_id(meter_id, PLAN_ULO))
+    if tiered:
+        ids.append(cost_if_statistic_id(meter_id, PLAN_TIERED))
+    return ids
+
+
+def _missing_series(hass: HomeAssistant, ids: list[str]) -> list[str]:
+    """The subset of ``ids`` with no stored statistics (runs in the recorder executor)."""
+    return [
+        statistic_id
+        for statistic_id in ids
+        if not get_last_statistics(hass, 1, statistic_id, True, {"sum"}).get(statistic_id)
+    ]
+
+
+async def async_missing_series(hass: HomeAssistant, ids: list[str]) -> list[str]:
+    """Return the ids from ``ids`` that have no stored statistics yet."""
+    return await get_instance(hass).async_add_executor_job(_missing_series, hass, ids)
+
+
 async def _async_import_series(
     hass: HomeAssistant,
     statistic_id: str,
     name: str,
     points: list[tuple[datetime, float]],
     unit: str,
-) -> int:
-    """Import one forward-only sum statistic series; return points added."""
-    if not points:
-        return 0
+) -> float | None:
+    """Import one forward-only sum statistic series.
+
+    Returns the series' cumulative sum after the import — the value its last
+    row will carry once the recorder flushes (computed here rather than read
+    back, since recorder writes are queued) — or None if the series has never
+    stored a point.
+    """
     row = await _async_last_row(hass, statistic_id)
     base_sum = (row.get("sum") or 0.0) if row else 0.0
     last_start = _normalize_start(row.get("start")) if row else None
 
     stats = _build_statistics(points, last_start, base_sum)
     if not stats:
-        return 0
+        return base_sum if row else None
 
     metadata = StatisticMetaData(
         has_mean=False,
@@ -381,7 +494,7 @@ async def _async_import_series(
     )
     LOGGER.debug("Adding %d statistics points to %s", len(stats), statistic_id)
     async_add_external_statistics(hass, metadata, stats)
-    return len(stats)
+    return stats[-1]["sum"]
 
 
 async def async_import_meter(
@@ -393,13 +506,14 @@ async def async_import_meter(
     tiered: TieredRates | None,
     periods: list[BillingPeriod],
     currency: str,
-) -> int:
+) -> float | None:
     """Import a meter's consumption, all buckets, active cost, and cost_if_* series.
 
-    Returns the number of consumption points added.
+    Returns the consumption series' cumulative sum — the meter's lifetime kWh
+    since the first backfill (None until anything has been stored).
     """
     kwh = UnitOfEnergy.KILO_WATT_HOUR
-    added = await _async_import_series(
+    total = await _async_import_series(
         hass,
         consumption_statistic_id(meter_id),
         f"Enova Power consumption ({meter_id})",
@@ -414,6 +528,16 @@ async def async_import_meter(
             f"Enova Power {key.replace('_', ' ')} ({meter_id})",
             points,
             kwh,
+        )
+
+    # Per-bucket energy cost, pairable with the kWh buckets in the Energy dashboard.
+    for key, points in bucket_cost_points(readings, rates, tiered, periods).items():
+        await _async_import_series(
+            hass,
+            bucket_cost_statistic_id(meter_id, key),
+            f"Enova Power {key.replace('_', ' ')} cost ({meter_id})",
+            points,
+            currency,
         )
 
     # Active-plan energy cost.
@@ -435,4 +559,4 @@ async def async_import_meter(
             currency,
         )
 
-    return added
+    return total

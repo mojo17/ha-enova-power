@@ -43,8 +43,10 @@ from .statistics import (
     TieredRates,
     async_import_meter,
     async_last_statistic_start,
+    async_missing_series,
     consumption_statistic_id,
     cost_total,
+    expected_statistic_ids,
     season_threshold,
     tiered_rates,
 )
@@ -63,6 +65,7 @@ class MeterData:
     cycle_cost: float | None  # estimated energy cost this cycle to date (CAD)
     last_bill: BillingPeriod | None  # most recent closed cycle (actual $)
     threshold: float | None  # current tier-1 kWh cap (Tiered only)
+    lifetime_energy: float | None  # kWh since first import (the LTS cumulative sum)
 
 
 def fetch_from_date(last_start: datetime | None, today: date) -> date:
@@ -157,6 +160,20 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
         last_start = await async_last_statistic_start(
             self.hass, consumption_statistic_id(meter_id)
         )
+        if last_start is not None:
+            # Imports are forward-only, so a series added by an upgrade can only
+            # get history older than its first point from a full refetch now.
+            missing = await async_missing_series(
+                self.hass, expected_statistic_ids(meter_id, plan, self.rates, tiered)
+            )
+            if missing:
+                LOGGER.info(
+                    "Meter %s gained %d statistics series; refetching full history "
+                    "once to backfill them",
+                    meter_id,
+                    len(missing),
+                )
+                last_start = None
         # Always cover the whole current cycle so cycle-to-date and tier
         # accumulation are correct.
         from_date = min(fetch_from_date(last_start, today), cycle_start)
@@ -164,7 +181,7 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
             LOGGER.debug("No prior statistics for %s; backfilling from %s", meter_id, from_date)
 
         readings = await self.client.download_usage(from_date, today, meter_id=meter_id)
-        await async_import_meter(
+        lifetime = await async_import_meter(
             self.hass, meter_id, readings, plan, self.rates, tiered, periods, CURRENCY
         )
 
@@ -176,6 +193,7 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
             cycle_cost=cost_total(cycle, plan, self.rates, tiered, periods) if cycle else None,
             last_bill=max(periods, key=lambda p: p.end_date) if periods else None,
             threshold=season_threshold(today) if plan == PLAN_TIERED else None,
+            lifetime_energy=lifetime,
         )
 
     async def _fetch_rates(self, today: date) -> list[TariffRate]:

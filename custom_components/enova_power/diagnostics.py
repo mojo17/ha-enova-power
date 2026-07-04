@@ -27,8 +27,9 @@ async def async_get_config_entry_diagnostics(
                     md.latest.date.isoformat() if md.latest else None
                 ),
                 "latest_total_kwh": md.latest.total if md.latest else None,
-                "mtd_energy_kwh": md.mtd_energy,
-                "mtd_cost": md.mtd_cost,
+                "cycle_energy_kwh": md.cycle_energy,
+                "cycle_cost": md.cycle_cost,
+                "lifetime_energy_kwh": md.lifetime_energy,
             }
             for md in data.values()
         ],

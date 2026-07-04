@@ -44,6 +44,7 @@
     "sensor": {
       "latest_daily_consumption": { "name": "Latest daily consumption" },
       "latest_reading_date": { "name": "Latest reading date" },
+      "total_consumption": { "name": "Total consumption" },
       "cycle_to_date_consumption": { "name": "Billing cycle consumption" },
       "cycle_to_date_energy_cost": { "name": "Billing cycle energy cost" },
       "last_bill_amount": { "name": "Last bill amount" },

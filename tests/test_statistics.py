@@ -16,12 +16,17 @@ from custom_components.enova_power.const import (
     PLAN_TOU,
     PLAN_ULO,
 )
+import custom_components.enova_power.statistics as statistics_module
 from custom_components.enova_power.statistics import (
     TieredRates,
+    _async_import_series,
     _build_statistics,
     _cycle_key,
+    _missing_series,
     _period_daily,
     _tier_daily,
+    bucket_cost_points,
+    bucket_cost_statistic_id,
     bucket_points,
     bucket_statistic_id,
     consumption_statistic_id,
@@ -29,6 +34,7 @@ from custom_components.enova_power.statistics import (
     cost_points,
     cost_statistic_id,
     cost_total,
+    expected_statistic_ids,
     plan_prices,
     season_threshold,
     tiered_rates,
@@ -69,6 +75,8 @@ async def test_statistic_ids() -> None:
     assert consumption_statistic_id("111") == "enova_power:energy_consumption_111"
     assert bucket_statistic_id("111", "tou_on_peak") == "enova_power:energy_tou_on_peak_111"
     assert bucket_statistic_id("111", "tier1") == "enova_power:energy_tier1_111"
+    assert bucket_cost_statistic_id("111", "tou_on_peak") == "enova_power:cost_tou_on_peak_111"
+    assert bucket_cost_statistic_id("111", "tier1") == "enova_power:cost_tier1_111"
     assert cost_statistic_id("111") == "enova_power:energy_cost_111"
     assert cost_if_statistic_id("111", PLAN_ULO) == "enova_power:cost_if_ulo_111"
 
@@ -168,6 +176,85 @@ async def test_cost_points_empty_without_rates() -> None:
     assert cost_points([r], PLAN_TOU, [], None, []) == []
 
 
+# --- per-bucket cost ---------------------------------------------------------- #
+
+
+async def test_bucket_cost_points_tou() -> None:
+    r = _reading(date(2026, 6, 1), h01=10.0, h13=5.0)  # off 10, on 5
+    buckets = bucket_cost_points([r], TOU_RATES, None, [])
+    assert buckets["tou_off_peak"][0][1] == pytest.approx(0.98)  # 10 × 9.8¢
+    assert buckets["tou_on_peak"][0][1] == pytest.approx(1.015)  # 5 × 20.3¢
+    # No ULO rates and no tiered rates → those buckets are omitted entirely.
+    assert not any(key.startswith("ulo_") for key in buckets)
+    assert "tier1" not in buckets
+
+
+async def test_bucket_cost_points_tiers() -> None:
+    periods = [BillingPeriod(date(2026, 5, 31), date(2026, 6, 30), 30, 0.0, 0.0)]
+    readings = [
+        _reading(date(2026, 6, 1), h13=500.0),
+        _reading(date(2026, 6, 2), h13=200.0),  # crosses 600 → 100 t1 + 100 t2
+    ]
+    buckets = bucket_cost_points(readings, [], TieredRates(tier1=10.0, tier2=20.0), periods)
+    assert [c for _, c in buckets["tier1"]] == pytest.approx([50.0, 10.0])
+    assert [c for _, c in buckets["tier2"]] == pytest.approx([0.0, 20.0])
+
+
+async def test_bucket_costs_sum_to_scheme_cost() -> None:
+    # A scheme's bucket costs must always sum to its cost series (per day).
+    r = _reading(date(2026, 6, 1), h01=10.0, h09=3.0, h13=5.0)
+    buckets = bucket_cost_points([r], TOU_RATES, None, [])
+    bucket_total = sum(cost for points in buckets.values() for _, cost in points)
+    (day_point,) = cost_points([r], PLAN_TOU, TOU_RATES, None, [])
+    assert bucket_total == pytest.approx(day_point[1])
+
+
+# --- upgrade detection (expected vs stored series) ---------------------------- #
+
+
+async def test_expected_ids_without_rates() -> None:
+    ids = expected_statistic_ids("111", PLAN_TOU, [], None)
+    # Consumption + the 9 kWh buckets always; no cost ids without rates.
+    assert len(ids) == 10
+    assert consumption_statistic_id("111") in ids
+    assert not any(":cost" in statistic_id for statistic_id in ids)
+
+
+async def test_expected_ids_with_tou_rates() -> None:
+    ids = expected_statistic_ids("111", PLAN_TOU, TOU_RATES, None)
+    assert bucket_cost_statistic_id("111", "tou_on_peak") in ids
+    assert cost_statistic_id("111") in ids  # active plan (TOU) is priced
+    assert cost_if_statistic_id("111", PLAN_TOU) in ids
+    # ULO rates and tiered rates unavailable → their cost ids are not expected.
+    assert bucket_cost_statistic_id("111", "ulo_overnight") not in ids
+    assert bucket_cost_statistic_id("111", "tier1") not in ids
+    assert cost_if_statistic_id("111", PLAN_TIERED) not in ids
+
+
+async def test_expected_ids_tiered_plan() -> None:
+    ids = expected_statistic_ids("111", PLAN_TIERED, TIER_RATES, tiered_rates(TIER_RATES))
+    assert bucket_cost_statistic_id("111", "tier1") in ids
+    assert bucket_cost_statistic_id("111", "tier2") in ids
+    assert cost_statistic_id("111") in ids
+    assert cost_if_statistic_id("111", PLAN_TIERED) in ids
+    # TOU prices missing → the active-cost id must not depend on them, but
+    # TOU bucket costs and cost_if_tou are not expected.
+    assert bucket_cost_statistic_id("111", "tou_on_peak") not in ids
+
+
+async def test_missing_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    stored = {"enova_power:energy_consumption_111"}
+    monkeypatch.setattr(
+        statistics_module,
+        "get_last_statistics",
+        lambda hass, n, statistic_id, convert, types: (
+            {statistic_id: [{"sum": 1.0}]} if statistic_id in stored else {}
+        ),
+    )
+    ids = ["enova_power:energy_consumption_111", "enova_power:cost_tou_on_peak_111"]
+    assert _missing_series(None, ids) == ["enova_power:cost_tou_on_peak_111"]
+
+
 # --- forward-only sum ------------------------------------------------------- #
 
 
@@ -184,3 +271,103 @@ async def test_build_statistics_resumes_and_dedups() -> None:
     stats = _build_statistics(points, last_start=base.replace(hour=6), base_sum=10.0)
     assert len(stats) == 1
     assert stats[0]["sum"] == 13.0
+
+
+# --- import series return value (lifetime total) ----------------------------- #
+
+
+def _patch_import(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> list:
+    """Stub the recorder read/write; return the list capturing written stats."""
+    written: list = []
+
+    async def fake_last_row(hass, statistic_id):
+        return row
+
+    monkeypatch.setattr(statistics_module, "_async_last_row", fake_last_row)
+    monkeypatch.setattr(
+        statistics_module,
+        "async_add_external_statistics",
+        lambda hass, metadata, stats: written.extend(stats),
+    )
+    return written
+
+
+async def test_import_series_returns_cumulative_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written = _patch_import(monkeypatch, None)
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    points = [(base, 1.0), (base.replace(hour=6), 2.0)]
+    total = await _async_import_series(None, "enova_power:x", "x", points, "kWh")
+    assert total == 3.0
+    assert [s["sum"] for s in written] == [1.0, 3.0]
+
+
+async def test_import_series_resumes_from_stored_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    _patch_import(monkeypatch, {"start": base, "sum": 10.0})
+    total = await _async_import_series(
+        None, "enova_power:x", "x", [(base.replace(hour=6), 2.0)], "kWh"
+    )
+    assert total == 12.0
+
+
+async def test_import_series_total_survives_no_new_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nothing new published (or everything already stored) → the stored sum.
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    written = _patch_import(monkeypatch, {"start": base, "sum": 10.0})
+    assert await _async_import_series(None, "enova_power:x", "x", [], "kWh") == 10.0
+    assert await _async_import_series(
+        None, "enova_power:x", "x", [(base, 1.0)], "kWh"
+    ) == 10.0
+    assert written == []
+
+
+async def test_import_series_none_when_series_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_import(monkeypatch, None)
+    assert await _async_import_series(None, "enova_power:x", "x", [], "kWh") is None
+
+
+async def test_import_meter_writes_bucket_costs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written: dict[str, str] = {}  # statistic_id → unit
+
+    async def fake_last_row(hass, statistic_id):
+        return None
+
+    monkeypatch.setattr(statistics_module, "_async_last_row", fake_last_row)
+    monkeypatch.setattr(
+        statistics_module,
+        "async_add_external_statistics",
+        lambda hass, metadata, stats: written.__setitem__(
+            metadata["statistic_id"], metadata["unit_of_measurement"]
+        ),
+    )
+
+    rates = TOU_RATES + TIER_RATES
+    tiered = tiered_rates(TIER_RATES)
+    readings = [_reading(date(2026, 6, 1), h01=10.0, h13=5.0)]
+    total = await statistics_module.async_import_meter(
+        None, "111", readings, PLAN_TOU, rates, tiered, [], "CAD"
+    )
+
+    assert total == 15.0
+    assert written[consumption_statistic_id("111")] == "kWh"
+    assert written[bucket_cost_statistic_id("111", "tou_off_peak")] == "CAD"
+    assert written[bucket_cost_statistic_id("111", "tou_on_peak")] == "CAD"
+    assert written[bucket_cost_statistic_id("111", "tier1")] == "CAD"
+    assert cost_statistic_id("111") in written
+    assert cost_if_statistic_id("111", PLAN_TIERED) in written
+    # No ULO rates → no ULO cost series (and none expected, so no refetch loop).
+    assert cost_if_statistic_id("111", PLAN_ULO) not in written
+    assert bucket_cost_statistic_id("111", "ulo_overnight") not in written
+    # Everything written must be expected, or upgrade detection would never settle.
+    expected = set(expected_statistic_ids("111", PLAN_TOU, rates, tiered))
+    assert set(written) <= expected
