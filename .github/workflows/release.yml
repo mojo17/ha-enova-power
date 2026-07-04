@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Uses the GitHub CLI/API; gate to GitHub so the Gitea mirror doesn't
+    # fail it (same as validate.yml).
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # actions/checkout replaces the annotated tag object with a lightweight
+      # one pointing at the commit; re-fetch it to read the annotation.
+      - run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          subject=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")
+          title=$(printf '%s' "$subject" | sed -E 's/^Release ([0-9])/v\1/')
+          [ -n "$title" ] || title="$GITHUB_REF_NAME"
+          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" \
+            | grep -v '^Co-Authored-By:' > /tmp/notes.md || true
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$title" --notes-file /tmp/notes.md
