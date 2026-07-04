@@ -35,7 +35,6 @@ coordinator detect that case and refetch full history once so it backfills.
 
 from __future__ import annotations
 
-import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -479,24 +478,20 @@ def rebuild_statistic_ids(meter_id: str) -> list[str]:
     return ids
 
 
-async def async_rebuild_statistics(hass: HomeAssistant, meter_ids: list[str]) -> None:
-    """Clear outdated-format series so the next refresh re-imports them in full.
+def async_start_rebuild(hass: HomeAssistant, meter_ids: list[str]) -> None:
+    """Queue clearing of the outdated-format series. Fire-and-forget by design.
 
-    Runs before the coordinator's first refresh; the cleared series then show
-    up as missing, which triggers the existing full-history backfill path.
-
-    Clearing must run on the recorder's own thread (its meta manager asserts
-    this), so it is queued via ``async_clear_statistics`` and awaited through
-    the ``on_done`` callback — the wait guarantees the first refresh cannot
-    observe pre-clear rows and skip the backfill.
+    The recorder does not process its task queue until Home Assistant has
+    fully started, so setup must never *wait* on it — during bootstrap that
+    deadlocks into the stage-2 timeout and setup gets cancelled. Correctness
+    doesn't need the wait: the rebuild cycle imports these series with
+    ``rebuild=True`` (ignoring whatever rows are still stored), and the
+    recorder executes this clear before those imports because both go through
+    its queue in order.
     """
     ids = [sid for meter_id in meter_ids for sid in rebuild_statistic_ids(meter_id)]
-    done = asyncio.Event()
-    get_instance(hass).async_clear_statistics(
-        ids, on_done=lambda: hass.loop.call_soon_threadsafe(done.set)
-    )
-    await done.wait()
-    LOGGER.info("Cleared %d statistics series for a format rebuild", len(ids))
+    get_instance(hass).async_clear_statistics(ids)
+    LOGGER.info("Queued %d statistics series to be cleared for a format rebuild", len(ids))
 
 
 def _missing_series(hass: HomeAssistant, ids: list[str]) -> list[str]:
@@ -519,6 +514,8 @@ async def _async_import_series(
     name: str,
     points: list[tuple[datetime, float]],
     unit: str,
+    *,
+    fresh: bool = False,
 ) -> float | None:
     """Import one forward-only sum statistic series.
 
@@ -526,8 +523,12 @@ async def _async_import_series(
     row will carry once the recorder flushes (computed here rather than read
     back, since recorder writes are queued) — or None if the series has never
     stored a point.
+
+    With ``fresh=True`` any stored rows are ignored (sum restarts at zero,
+    nothing is filtered): used by the format rebuild, whose queued clear may
+    not have executed yet when this runs.
     """
-    row = await _async_last_row(hass, statistic_id)
+    row = None if fresh else await _async_last_row(hass, statistic_id)
     base_sum = (row.get("sum") or 0.0) if row else 0.0
     last_start = _normalize_start(row.get("start")) if row else None
 
@@ -557,8 +558,14 @@ async def async_import_meter(
     tiered: TieredRates | None,
     periods: list[BillingPeriod],
     currency: str,
+    *,
+    rebuild: bool = False,
 ) -> float | None:
     """Import a meter's consumption, all buckets, active cost, and cost_if_* series.
+
+    ``rebuild=True`` re-imports every series except consumption from scratch
+    (see ``async_start_rebuild``); consumption is always incremental — it has
+    been hourly from the start and keeps its history.
 
     Returns the consumption series' cumulative sum — the meter's lifetime kWh
     since the first backfill (None until anything has been stored).
@@ -579,6 +586,7 @@ async def async_import_meter(
             f"Enova Power {key.replace('_', ' ')} ({meter_id})",
             points,
             kwh,
+            fresh=rebuild,
         )
 
     # Per-bucket energy cost, pairable with the kWh buckets in the Energy dashboard.
@@ -589,6 +597,7 @@ async def async_import_meter(
             f"Enova Power {key.replace('_', ' ')} cost ({meter_id})",
             points,
             currency,
+            fresh=rebuild,
         )
 
     # Active-plan energy cost.
@@ -598,6 +607,7 @@ async def async_import_meter(
         f"Enova Power energy cost ({meter_id})",
         cost_points(readings, plan, rates, tiered, periods),
         currency,
+        fresh=rebuild,
     )
 
     # What-if energy cost under each plan (plan comparison).
@@ -608,6 +618,7 @@ async def async_import_meter(
             f"Enova Power cost if {_SCHEME[scheme_plan]} ({meter_id})",
             cost_points(readings, scheme_plan, rates, tiered, periods),
             currency,
+            fresh=rebuild,
         )
 
     return total

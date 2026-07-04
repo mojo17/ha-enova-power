@@ -17,7 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .const import CONF_STATS_VERSION, LOGGER
 from .coordinator import EnovaPowerCoordinator
-from .statistics import STATS_VERSION, async_rebuild_statistics
+from .statistics import STATS_VERSION, async_start_rebuild
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -49,11 +49,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -
     if not client.meter_id:
         raise ConfigEntryNotReady("No Enova Power meter found for this account yet")
 
-    # One-time statistics-format rebuild: clear outdated series before the
-    # first refresh so the missing-series check backfills them in the new
-    # format (imports are forward-only; granularity can't change in place).
-    # Runs before the update listener is registered, so the entry update
-    # below does not trigger a reload.
+    # One-time statistics-format rebuild (imports are forward-only, so
+    # granularity can't change in place): queue clearing the outdated series —
+    # fire-and-forget, NEVER awaited, since the recorder holds its queue until
+    # HA has fully started and waiting here deadlocks bootstrap. The
+    # coordinator's first refresh re-imports those series from scratch and
+    # stamps CONF_STATS_VERSION once the rebuild cycle succeeds.
     if entry.data.get(CONF_STATS_VERSION, 1) < STATS_VERSION:
         LOGGER.info(
             "Statistics format changed (v%s -> v%s); rebuilding bucket and "
@@ -61,10 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnovaPowerConfigEntry) -
             entry.data.get(CONF_STATS_VERSION, 1),
             STATS_VERSION,
         )
-        await async_rebuild_statistics(hass, client.meter_ids)
-        hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_STATS_VERSION: STATS_VERSION}
-        )
+        async_start_rebuild(hass, client.meter_ids)
 
     coordinator = EnovaPowerCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()

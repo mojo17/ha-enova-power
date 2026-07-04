@@ -31,6 +31,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     BACKFILL_MONTHS,
     CONF_PLAN,
+    CONF_STATS_VERSION,
     CURRENCY,
     DEFAULT_PLAN,
     DOMAIN,
@@ -40,6 +41,7 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .statistics import (
+    STATS_VERSION,
     TieredRates,
     async_import_meter,
     async_last_statistic_start,
@@ -113,6 +115,12 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
         # Account-wide scraped tariff rates (all plans), refreshed each cycle and
         # read by the rate-card and current-rate sensors. Empty until first fetch.
         self.rates: list[TariffRate] = []
+        # Statistics-format rebuild pending: setup queued a clear of the old
+        # series (see statistics.async_start_rebuild); this cycle must re-import
+        # them from scratch over the full backfill window. Stamped complete
+        # (and the flag dropped) only after a fully successful cycle, so any
+        # failure retries the whole rebuild idempotently.
+        self._rebuild = entry.data.get(CONF_STATS_VERSION, 1) < STATS_VERSION
 
     def plan_override(self) -> str | None:
         """Account-wide plan override (options, or a legacy configured value)."""
@@ -143,6 +151,16 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
             raise ConfigEntryAuthFailed(str(err)) from err
         except EnovaError as err:  # also covers EnovaNetworkError + parse/form errors
             raise UpdateFailed(str(err)) from err
+        if self._rebuild:
+            # All meters re-imported in the new format; record it so the next
+            # setup doesn't rebuild again. Runs before the entry's update
+            # listener is registered (first refresh), so no reload is triggered.
+            self._rebuild = False
+            entry = self.config_entry
+            self.hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_STATS_VERSION: STATS_VERSION}
+            )
+            LOGGER.info("Statistics format rebuild complete (v%s)", STATS_VERSION)
         return data
 
     async def _update_meter(
@@ -157,23 +175,30 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
             periods = []
 
         cycle_start = current_cycle_start(periods, today)
-        last_start = await async_last_statistic_start(
-            self.hass, consumption_statistic_id(meter_id)
-        )
-        if last_start is not None:
-            # Imports are forward-only, so a series added by an upgrade can only
-            # get history older than its first point from a full refetch now.
-            missing = await async_missing_series(
-                self.hass, expected_statistic_ids(meter_id, plan, self.rates, tiered)
+        if self._rebuild:
+            # Format rebuild: full backfill window, and skip the missing-series
+            # check — the queued clear may not have run yet, so stored rows
+            # can't be trusted either way (the fresh imports ignore them).
+            last_start = None
+        else:
+            last_start = await async_last_statistic_start(
+                self.hass, consumption_statistic_id(meter_id)
             )
-            if missing:
-                LOGGER.info(
-                    "Meter %s gained %d statistics series; refetching full history "
-                    "once to backfill them",
-                    meter_id,
-                    len(missing),
+            if last_start is not None:
+                # Imports are forward-only, so a series added by an upgrade can
+                # only get history older than its first point from a full
+                # refetch now.
+                missing = await async_missing_series(
+                    self.hass, expected_statistic_ids(meter_id, plan, self.rates, tiered)
                 )
-                last_start = None
+                if missing:
+                    LOGGER.info(
+                        "Meter %s gained %d statistics series; refetching full "
+                        "history once to backfill them",
+                        meter_id,
+                        len(missing),
+                    )
+                    last_start = None
         # Always cover the whole current cycle so cycle-to-date and tier
         # accumulation are correct.
         from_date = min(fetch_from_date(last_start, today), cycle_start)
@@ -182,7 +207,15 @@ class EnovaPowerCoordinator(DataUpdateCoordinator[dict[str, "MeterData"]]):
 
         readings = await self.client.download_usage(from_date, today, meter_id=meter_id)
         lifetime = await async_import_meter(
-            self.hass, meter_id, readings, plan, self.rates, tiered, periods, CURRENCY
+            self.hass,
+            meter_id,
+            readings,
+            plan,
+            self.rates,
+            tiered,
+            periods,
+            CURRENCY,
+            rebuild=self._rebuild,
         )
 
         cycle = [r for r in readings if r.date >= cycle_start]

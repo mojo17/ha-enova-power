@@ -296,28 +296,74 @@ async def test_rebuild_ids_cover_everything_but_consumption() -> None:
     }
 
 
-async def test_async_rebuild_clears_all_meters(monkeypatch: pytest.MonkeyPatch) -> None:
-    import asyncio
-    from types import SimpleNamespace
-
+async def test_start_rebuild_queues_clear_for_all_meters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cleared: list[str] = []
 
     class FakeRecorder:
-        # Mirrors Recorder.async_clear_statistics: queues the clear on the
-        # recorder thread and reports completion through on_done.
-        def async_clear_statistics(self, ids, *, on_done=None):
+        # Mirrors Recorder.async_clear_statistics: queues onto the recorder
+        # thread. The rebuild must never wait on it — the recorder holds its
+        # queue until HA has started, so a wait deadlocks bootstrap.
+        def async_clear_statistics(self, ids):
             cleared.extend(ids)
-            if on_done is not None:
-                on_done()
 
     monkeypatch.setattr(statistics_module, "get_instance", lambda hass: FakeRecorder())
-    fake_hass = SimpleNamespace(loop=asyncio.get_running_loop())
 
-    await statistics_module.async_rebuild_statistics(fake_hass, ["111", "222"])
+    statistics_module.async_start_rebuild(None, ["111", "222"])
 
     assert len(cleared) == 44
     assert bucket_statistic_id("111", "tier1") in cleared
     assert bucket_cost_statistic_id("222", "ulo_overnight") in cleared
+
+
+async def test_import_series_fresh_ignores_stored_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stale row exists (the queued clear hasn't executed yet); fresh=True
+    # must neither filter against it nor resume from its sum.
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    written = _patch_import(monkeypatch, {"start": base.replace(hour=7), "sum": 500.0})
+    points = [(base, 1.0), (base.replace(hour=6), 2.0)]
+
+    total = await _async_import_series(
+        None, "enova_power:x", "x", points, "kWh", fresh=True
+    )
+
+    assert total == 3.0
+    assert [s["sum"] for s in written] == [1.0, 3.0]
+
+
+async def test_import_meter_rebuild_leaves_consumption_incremental(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_row = {"start": datetime(2026, 6, 2, 0, tzinfo=timezone.utc), "sum": 500.0}
+    written: dict[str, list[float]] = {}
+
+    async def fake_last_row(hass, statistic_id):
+        return stale_row
+
+    monkeypatch.setattr(statistics_module, "_async_last_row", fake_last_row)
+    monkeypatch.setattr(
+        statistics_module,
+        "async_add_external_statistics",
+        lambda hass, metadata, stats: written.__setitem__(
+            metadata["statistic_id"], [s["sum"] for s in stats]
+        ),
+    )
+
+    readings = [_reading(date(2026, 6, 1), h01=10.0, h13=5.0)]
+    total = await statistics_module.async_import_meter(
+        None, "111", readings, PLAN_TOU, TOU_RATES, None, [], "CAD", rebuild=True
+    )
+
+    # Consumption stays incremental: all points predate the stored row → no
+    # writes, and the lifetime total is the stored sum.
+    assert total == 500.0
+    assert consumption_statistic_id("111") not in written
+    # Rebuilt series ignore the stale row: full points, sums from zero.
+    assert written[bucket_statistic_id("111", "tou_off_peak")] == [10.0]
+    assert written[bucket_cost_statistic_id("111", "tou_on_peak")] == pytest.approx([1.015])
 
 
 # --- forward-only sum ------------------------------------------------------- #
