@@ -9,7 +9,7 @@ hardcoded rather than scraped.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from .const import (
     PERIOD_MID_PEAK,
@@ -19,22 +19,27 @@ from .const import (
     PERIOD_ULO_OVERNIGHT,
     PLAN_TIERED,
     PLAN_ULO,
+    TIME_ZONE,
 )
 
-# The meter clock and the portal's own TOU classification use fixed Eastern
-# Standard Time (UTC-5) year-round — NOT DST-observing local time. This was
-# verified by reclassifying hourly intervals and matching the portal's per-day
-# total_on/mid/off_peak exactly. So period classification converts timestamps to
-# this fixed offset before applying the schedule (see period_for_interval).
-EASTERN_FIXED = timezone(timedelta(hours=-5))
+# The portal's hourly labels are **local Ontario wall-clock time** (DST-
+# observing), and the OEB schedule is defined in the same clock — so period
+# classification converts timestamps to America/Toronto before applying the
+# schedule. Verified two ways: reclassifying hourly intervals matches the
+# portal's per-day total_on/mid/off_peak exactly, and the DST transition days
+# carry the local-clock signatures (the spring-forward day zeroes the skipped
+# hour's slot; the fall-back day lumps the repeated hour). An earlier fixed-EST
+# interpretation classified identically by label value but put summer
+# timestamps one hour late.
 
 
 def period_for_interval(interval_utc: datetime, plan: str) -> str:
     """Classify a UTC hourly-interval start into its pricing period for ``plan``.
 
-    Converts to fixed EST first so the result matches the portal's own bucketing.
+    Converts to local Ontario time first, matching both the OEB schedule and
+    the portal's own bucketing.
     """
-    return current_period(interval_utc.astimezone(EASTERN_FIXED), plan)
+    return current_period(interval_utc.astimezone(TIME_ZONE), plan)
 
 
 def _easter(year: int) -> date:

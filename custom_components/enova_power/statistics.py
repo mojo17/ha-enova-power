@@ -10,9 +10,9 @@ was used. ``STATS_VERSION`` tracks this format: bumping it makes setup clear
 and rebuild the affected series from a full re-download (imports are
 forward-only, so a granularity change can't be fixed in place).
 
-Buckets are **usage classifications**, computed from the hourly intervals by the
-meter's fixed-EST hour (verified to match the portal's own TOU totals — see
-``schedule.period_for_interval``). All plan schemes are classified for every
+Buckets are **usage classifications**, computed from the hourly intervals by
+local Ontario wall-clock time (verified to match the portal's own TOU totals —
+see ``schedule.period_for_interval``). All plan schemes are classified for every
 account (plan-independent), so a plan change never orphans a bucket; only the
 active ``energy_cost`` series changes which rates it applies. Cost is the energy
 line item only (excludes delivery, regulatory charges, rebates and tax); the
@@ -178,7 +178,7 @@ def season_threshold(d: date) -> float:
 def _period_hourly(
     readings: Iterable[UsageReading], plan: str
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """``{period: [(hour_start, kWh)]}`` classifying each hour by fixed-EST time.
+    """``{period: [(hour_start, kWh)]}`` classifying each hour by local Ontario time.
 
     ``plan`` selects the schedule (TOU vs ULO). Points keep the source's hourly
     granularity — the same resolution as the consumption series — so charts
@@ -458,17 +458,20 @@ def expected_statistic_ids(
 
 # Statistics format version, stamped into the config entry after a rebuild.
 # Bump when the shape of already-imported series changes. Version 2 = hourly
-# bucket/cost granularity (version 1 imported one point per day).
-STATS_VERSION = 2
+# bucket/cost granularity (version 1 imported one point per day). Version 3 =
+# local-wall-clock timestamps (fixed-EST interpretation put summer hours one
+# hour late) — this one shifts consumption too, so everything rebuilds.
+STATS_VERSION = 3
 
 
 def rebuild_statistic_ids(meter_id: str) -> list[str]:
-    """The statistic ids cleared for a format rebuild.
+    """The statistic ids cleared for a format rebuild — every series.
 
-    Everything except the consumption series, which has been hourly from the
-    start and keeps its history.
+    Consumption is included: the v3 timestamp fix moves its summer points, so
+    its history must be re-imported like everything else.
     """
-    ids = [bucket_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
+    ids = [consumption_statistic_id(meter_id)]
+    ids += [bucket_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
     ids += [bucket_cost_statistic_id(meter_id, key) for key in ALL_BUCKET_KEYS]
     ids.append(cost_statistic_id(meter_id))
     ids += [
@@ -563,9 +566,8 @@ async def async_import_meter(
 ) -> float | None:
     """Import a meter's consumption, all buckets, active cost, and cost_if_* series.
 
-    ``rebuild=True`` re-imports every series except consumption from scratch
-    (see ``async_start_rebuild``); consumption is always incremental — it has
-    been hourly from the start and keeps its history.
+    ``rebuild=True`` re-imports every series from scratch, consumption
+    included (see ``async_start_rebuild`` and ``rebuild_statistic_ids``).
 
     Returns the consumption series' cumulative sum — the meter's lifetime kWh
     since the first backfill (None until anything has been stored).
@@ -577,6 +579,7 @@ async def async_import_meter(
         f"Enova Power consumption ({meter_id})",
         _flatten_points(readings),
         kwh,
+        fresh=rebuild,
     )
 
     for key, points in bucket_points(readings, periods).items():

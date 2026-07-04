@@ -104,7 +104,7 @@ Semantics worth knowing:
 - **Buckets are usage classifications, not plan state.** All three schemes are classified for
   every account regardless of the active plan, so switching plans never orphans a series —
   only `energy_cost` changes which rates it applies. Hours are classified by the meter's
-  fixed-EST clock, which matches how the portal itself totals TOU usage.
+  local Ontario clock, which matches how the portal itself totals TOU usage.
 - **Cost is the energy line item only** — it excludes delivery, regulatory charges, rebates,
   and tax. The actual all-in amount is the *Last bill amount* sensor. The portal only
   publishes *current* rates, so costs apply today's rates and threshold to all history — an
@@ -167,7 +167,9 @@ What **not** to do:
 ## Notes & limitations
 
 - Data lags the current day by ~1–3 days (utility-side), so recent hours fill in later.
-- Interval data is in fixed Eastern Standard Time (UTC-5), handled by the library.
+- Interval data is labelled in local Ontario time (America/Toronto, DST-observing),
+  handled by the library — including the two DST transition days (the spring-forward
+  day's skipped hour is a dead slot; the fall-back day lumps the repeated hour).
 - License: Apache-2.0.
 
 ## Development

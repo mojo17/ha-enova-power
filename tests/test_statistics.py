@@ -103,25 +103,33 @@ async def test_season_threshold() -> None:
     assert season_threshold(date(2026, 1, 1)) == 1000.0  # winter
 
 
-# --- classification (fixed-EST) --------------------------------------------- #
+# --- classification (local Ontario clock) ------------------------------------ #
 
 
 async def test_period_hourly_tou_summer_weekday() -> None:
-    # 2026-06-01 is a Monday. h01=00:00 EST (off), h09=08:00 (mid), h13=12:00 (on).
+    # 2026-06-01 is a Monday. h01=00:00 local (off), h09=08:00 (mid), h13=12:00 (on).
     r = _reading(date(2026, 6, 1), h01=1.0, h09=3.0, h13=2.0)
     hourly = _period_hourly([r], PLAN_TOU)
-    # Points are hourly, timestamped at the interval start (fixed EST → UTC).
-    assert hourly[PERIOD_OFF_PEAK] == [(datetime(2026, 6, 1, 5, tzinfo=timezone.utc), 1.0)]
-    assert hourly[PERIOD_MID_PEAK] == [(datetime(2026, 6, 1, 13, tzinfo=timezone.utc), 3.0)]
-    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 17, tzinfo=timezone.utc), 2.0)]
+    # Points are hourly, timestamped at the interval start; June is EDT (UTC-4).
+    assert hourly[PERIOD_OFF_PEAK] == [(datetime(2026, 6, 1, 4, tzinfo=timezone.utc), 1.0)]
+    assert hourly[PERIOD_MID_PEAK] == [(datetime(2026, 6, 1, 12, tzinfo=timezone.utc), 3.0)]
+    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 16, tzinfo=timezone.utc), 2.0)]
 
 
 async def test_period_hourly_ulo_overnight() -> None:
-    # h02 = 01:00 EST → ULO overnight (23:00-07:00); h18 = 17:00 → ULO on-peak (16-21).
+    # h02 = 01:00 local → ULO overnight (23:00-07:00); h18 = 17:00 → ULO on-peak (16-21).
     r = _reading(date(2026, 6, 1), h02=4.0, h18=5.0)
     hourly = _period_hourly([r], PLAN_ULO)
-    assert hourly[PERIOD_ULO_OVERNIGHT] == [(datetime(2026, 6, 1, 6, tzinfo=timezone.utc), 4.0)]
-    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 22, tzinfo=timezone.utc), 5.0)]
+    assert hourly[PERIOD_ULO_OVERNIGHT] == [(datetime(2026, 6, 1, 5, tzinfo=timezone.utc), 4.0)]
+    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 6, 1, 21, tzinfo=timezone.utc), 5.0)]
+
+
+async def test_period_hourly_winter_matches_est() -> None:
+    # In winter EST = local, so h18 (17:00) lands at 22:00 UTC — the winter
+    # on-peak window the user verified in HA.
+    r = _reading(date(2026, 1, 15), h18=2.0)  # Thursday, winter on-peak 17-19
+    hourly = _period_hourly([r], PLAN_TOU)
+    assert hourly[PERIOD_ON_PEAK] == [(datetime(2026, 1, 15, 22, tzinfo=timezone.utc), 2.0)]
 
 
 async def test_period_hourly_keeps_hours_separate() -> None:
@@ -157,7 +165,7 @@ async def test_tier_hourly_crosses_threshold_in_cycle() -> None:
     tiers = _tier_hourly(readings, periods)
     assert [k for _, k in tiers["tier1"]] == pytest.approx([500.0, 100.0])
     # Zero-contribution hours are omitted: tier2 only starts at the crossing.
-    assert tiers["tier2"] == [(datetime(2026, 6, 2, 17, tzinfo=timezone.utc), 100.0)]
+    assert tiers["tier2"] == [(datetime(2026, 6, 2, 16, tzinfo=timezone.utc), 100.0)]
 
 
 async def test_tier_hourly_splits_within_a_day() -> None:
@@ -167,7 +175,7 @@ async def test_tier_hourly_splits_within_a_day() -> None:
     tiers = _tier_hourly(readings, periods)
     assert [k for _, k in tiers["tier1"]] == pytest.approx([590.0, 10.0])
     assert [k for _, k in tiers["tier2"]] == pytest.approx([10.0, 5.0])
-    assert tiers["tier2"][0][0] == datetime(2026, 6, 1, 6, tzinfo=timezone.utc)  # h02
+    assert tiers["tier2"][0][0] == datetime(2026, 6, 1, 5, tzinfo=timezone.utc)  # h02, EDT
 
 
 # --- cost ------------------------------------------------------------------- #
@@ -176,10 +184,10 @@ async def test_tier_hourly_splits_within_a_day() -> None:
 async def test_cost_points_tou_hourly() -> None:
     r = _reading(date(2026, 6, 1), h01=10.0, h13=5.0)  # off 10, on 5
     points = cost_points([r], PLAN_TOU, TOU_RATES, None, [])
-    # One point per hour: 10 × 9.8¢ at h01, 5 × 20.3¢ at h13.
+    # One point per hour: 10 × 9.8¢ at h01, 5 × 20.3¢ at h13 (June = EDT).
     assert points == [
-        (datetime(2026, 6, 1, 5, tzinfo=timezone.utc), pytest.approx(0.98)),
-        (datetime(2026, 6, 1, 17, tzinfo=timezone.utc), pytest.approx(1.015)),
+        (datetime(2026, 6, 1, 4, tzinfo=timezone.utc), pytest.approx(0.98)),
+        (datetime(2026, 6, 1, 16, tzinfo=timezone.utc), pytest.approx(1.015)),
     ]
 
 
@@ -281,19 +289,18 @@ async def test_missing_series(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- statistics-format rebuild ------------------------------------------------ #
 
 
-async def test_rebuild_ids_cover_everything_but_consumption() -> None:
+async def test_rebuild_ids_cover_every_series() -> None:
     ids = rebuild_statistic_ids("111")
-    # 9 kWh buckets + 9 cost buckets + energy_cost + 3 cost_if = 22 series.
-    assert len(ids) == 22
-    assert consumption_statistic_id("111") not in ids  # hourly since v1: keep it
+    # consumption + 9 kWh buckets + 9 cost buckets + energy_cost + 3 cost_if.
+    assert len(ids) == 23
+    # v3 moves timestamps, so consumption rebuilds too.
+    assert consumption_statistic_id("111") in ids
     assert bucket_statistic_id("111", "tou_on_peak") in ids
     assert bucket_cost_statistic_id("111", "tier2") in ids
     assert cost_statistic_id("111") in ids
     assert cost_if_statistic_id("111", PLAN_ULO) in ids
     # Rate-gating must not apply here: clear everything that may exist.
-    assert set(ids) >= set(expected_statistic_ids("111", PLAN_TOU, [], None)) - {
-        consumption_statistic_id("111")
-    }
+    assert set(ids) >= set(expected_statistic_ids("111", PLAN_TOU, [], None))
 
 
 async def test_start_rebuild_queues_clear_for_all_meters(
@@ -312,7 +319,8 @@ async def test_start_rebuild_queues_clear_for_all_meters(
 
     statistics_module.async_start_rebuild(None, ["111", "222"])
 
-    assert len(cleared) == 44
+    assert len(cleared) == 46
+    assert consumption_statistic_id("111") in cleared
     assert bucket_statistic_id("111", "tier1") in cleared
     assert bucket_cost_statistic_id("222", "ulo_overnight") in cleared
 
@@ -334,7 +342,7 @@ async def test_import_series_fresh_ignores_stored_rows(
     assert [s["sum"] for s in written] == [1.0, 3.0]
 
 
-async def test_import_meter_rebuild_leaves_consumption_incremental(
+async def test_import_meter_rebuild_reimports_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stale_row = {"start": datetime(2026, 6, 2, 0, tzinfo=timezone.utc), "sum": 500.0}
@@ -357,11 +365,10 @@ async def test_import_meter_rebuild_leaves_consumption_incremental(
         None, "111", readings, PLAN_TOU, TOU_RATES, None, [], "CAD", rebuild=True
     )
 
-    # Consumption stays incremental: all points predate the stored row → no
-    # writes, and the lifetime total is the stored sum.
-    assert total == 500.0
-    assert consumption_statistic_id("111") not in written
-    # Rebuilt series ignore the stale row: full points, sums from zero.
+    # Every series — consumption included (its timestamps moved in v3) —
+    # ignores the stale row: full points, sums restarting from zero.
+    assert total == 15.0
+    assert written[consumption_statistic_id("111")] == [10.0, 15.0]
     assert written[bucket_statistic_id("111", "tou_off_peak")] == [10.0]
     assert written[bucket_cost_statistic_id("111", "tou_on_peak")] == pytest.approx([1.015])
 

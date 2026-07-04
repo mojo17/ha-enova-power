@@ -14,7 +14,7 @@ these sensors are for at-a-glance use and automations, not energy-dashboard
 meters. The monotonic total-consumption sensor additionally serves as the one
 supported utility_meter source (monthly-or-longer cycles only — data arrives
 days late, so finer cycles misattribute usage). Live period/rate refresh on the
-hour (period boundaries are whole hours) and use fixed-EST classification to
+hour (period boundaries are whole hours) and classify by local Ontario time to
 match how the portal bills.
 """
 
