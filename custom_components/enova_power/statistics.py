@@ -25,12 +25,18 @@ Each kWh bucket also gets a paired **cost series** (``cost_<bucket>_<meter>``),
 priced at its scheme's current rates, so buckets can be tracked with costs in
 the Energy dashboard; a scheme's bucket costs sum to its ``cost_if_*`` series.
 
-External statistics carry an absolute cumulative ``sum``, so imports are
-**forward-only**: the running sum resumes from the last stored point and skips
-anything at or before it, which also makes re-imports idempotent. The flip side
-is that a series added by an upgrade can never fill history older than its
-first import — ``expected_statistic_ids`` + ``async_missing_series`` let the
-coordinator detect that case and refetch full history once so it backfills.
+External statistics carry an absolute cumulative ``sum``. When the downloaded
+window overlaps rows already stored, the import **anchors and rewrites**: it
+re-derives running sums from the last stored row *before* the window and
+re-imports the whole window, updating overlapping rows in place. This is
+idempotent when nothing changed, and it heals the portal's publication
+pattern — a day first appears as a preliminary row with the whole total in
+the first hour slot and explicit zeros elsewhere, then gets revised to real
+hourly values a day later. (A strictly forward-only import permanently locks
+in the preliminary shape.) History older than the downloaded window is never
+touched; a series added by an upgrade still can't backfill on its own —
+``expected_statistic_ids`` + ``async_missing_series`` let the coordinator
+detect that case and refetch full history once.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from enovapower import BillingPeriod, TariffRate, UsageReading
 
@@ -49,8 +55,10 @@ from homeassistant.components.recorder.models import (
     StatisticMetaData,
 )
 from homeassistant.components.recorder.statistics import (
+    STATISTIC_UNIT_TO_UNIT_CONVERTER,
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -413,6 +421,31 @@ async def _async_last_row(hass: HomeAssistant, statistic_id: str) -> dict | None
     return rows[0] if rows else None
 
 
+# How far back to look for the anchor row in one query before falling back to
+# a full-history scan (only relevant for series with months-long gaps).
+_ANCHOR_LOOKBACK = timedelta(days=90)
+
+
+def _row_before(hass: HomeAssistant, statistic_id: str, before: datetime) -> dict | None:
+    """The last stored row strictly before ``before`` (recorder executor)."""
+    for start in (before - _ANCHOR_LOOKBACK, datetime(1970, 1, 1, tzinfo=timezone.utc)):
+        rows = statistics_during_period(
+            hass, start, before, {statistic_id}, "hour", None, {"sum"}
+        ).get(statistic_id)
+        if rows:
+            return rows[-1]
+    return None
+
+
+async def _async_row_before(
+    hass: HomeAssistant, statistic_id: str, before: datetime
+) -> dict | None:
+    """Async wrapper for :func:`_row_before`."""
+    return await get_instance(hass).async_add_executor_job(
+        _row_before, hass, statistic_id, before
+    )
+
+
 async def async_last_statistic_start(
     hass: HomeAssistant, statistic_id: str
 ) -> datetime | None:
@@ -464,8 +497,11 @@ def expected_statistic_ids(
 # Bump when the shape of already-imported series changes. Version 2 = hourly
 # bucket/cost granularity (version 1 imported one point per day). Version 3 =
 # local-wall-clock timestamps (fixed-EST interpretation put summer hours one
-# hour late) — this one shifts consumption too, so everything rebuilds.
-STATS_VERSION = 3
+# hour late). Version 4 = heal days permanently locked in their preliminary
+# published shape (whole total in the first hour) by the old forward-only
+# import; the import now rewrites overlapping windows, but days that had
+# already rolled out of the download window need this one-time rebuild.
+STATS_VERSION = 4
 
 
 def rebuild_statistic_ids(meter_id: str) -> list[str]:
@@ -531,18 +567,35 @@ async def _async_import_series(
     back, since recorder writes are queued) — or None if the series has never
     stored a point.
 
+    When the window overlaps stored rows (the portal publishes a day as a
+    preliminary total-in-the-first-hour row and revises it to real hourly
+    values later), the import anchors on the last stored row *before* the
+    window, re-derives sums from there, and re-imports the window — updating
+    the overlapping rows in place instead of silently skipping the revision.
+
     With ``fresh=True`` any stored rows are ignored (sum restarts at zero,
     nothing is filtered): used by the format rebuild, whose queued clear may
     not have executed yet when this runs.
     """
     row = None if fresh else await _async_last_row(hass, statistic_id)
-    base_sum = (row.get("sum") or 0.0) if row else 0.0
-    last_start = _normalize_start(row.get("start")) if row else None
+    newest = _normalize_start(row.get("start")) if row else None
+    if newest is not None and points and newest >= points[0][0]:
+        # Stored rows overlap the window: rewrite it from the anchor.
+        anchor = await _async_row_before(hass, statistic_id, points[0][0])
+        base_sum = (anchor.get("sum") or 0.0) if anchor else 0.0
+        last_start = _normalize_start(anchor.get("start")) if anchor else None
+    else:
+        # No overlap: plain append after the newest stored row.
+        base_sum = (row.get("sum") or 0.0) if row else 0.0
+        last_start = newest
 
     stats = _build_statistics(points, last_start, base_sum)
     if not stats:
         return base_sum if row else None
 
+    # unit_class must be stated explicitly (required from HA 2026.11):
+    # "energy" for kWh; None for units with no converter (currency).
+    converter = STATISTIC_UNIT_TO_UNIT_CONVERTER.get(unit)
     metadata = StatisticMetaData(
         mean_type=StatisticMeanType.NONE,
         has_sum=True,
@@ -550,6 +603,7 @@ async def _async_import_series(
         source=DOMAIN,
         statistic_id=statistic_id,
         unit_of_measurement=unit,
+        unit_class=converter.UNIT_CLASS if converter else None,
     )
     LOGGER.debug("Adding %d statistics points to %s", len(stats), statistic_id)
     async_add_external_statistics(hass, metadata, stats)

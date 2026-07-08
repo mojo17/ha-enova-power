@@ -394,14 +394,20 @@ async def test_build_statistics_resumes_and_dedups() -> None:
 # --- import series return value (lifetime total) ----------------------------- #
 
 
-def _patch_import(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> list:
+def _patch_import(
+    monkeypatch: pytest.MonkeyPatch, row: dict | None, anchor: dict | None = None
+) -> list:
     """Stub the recorder read/write; return the list capturing written stats."""
     written: list = []
 
     async def fake_last_row(hass, statistic_id):
         return row
 
+    async def fake_row_before(hass, statistic_id, before):
+        return anchor
+
     monkeypatch.setattr(statistics_module, "_async_last_row", fake_last_row)
+    monkeypatch.setattr(statistics_module, "_async_row_before", fake_row_before)
     monkeypatch.setattr(
         statistics_module,
         "async_add_external_statistics",
@@ -435,14 +441,43 @@ async def test_import_series_resumes_from_stored_sum(
 async def test_import_series_total_survives_no_new_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Nothing new published (or everything already stored) → the stored sum.
+    # Nothing published at all this window → the stored sum, no writes.
     base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
     written = _patch_import(monkeypatch, {"start": base, "sum": 10.0})
     assert await _async_import_series(None, "enova_power:x", "x", [], "kWh") == 10.0
-    assert await _async_import_series(
-        None, "enova_power:x", "x", [(base, 1.0)], "kWh"
-    ) == 10.0
     assert written == []
+
+
+async def test_import_series_rewrites_overlapping_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The portal revises already-imported hours (preliminary → real values).
+    # An overlapping window must be rewritten from the anchor row before it,
+    # not silently skipped.
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    newest = {"start": base.replace(hour=7), "sum": 500.0}  # stale preliminary sums
+    anchor = {"start": base.replace(hour=4), "sum": 100.0}  # last row before window
+    written = _patch_import(monkeypatch, newest, anchor=anchor)
+
+    points = [(base, 2.0), (base.replace(hour=6), 3.0), (base.replace(hour=7), 4.0)]
+    total = await _async_import_series(None, "enova_power:x", "x", points, "kWh")
+
+    # Sums re-derived from the anchor, replacing the stale rows in place.
+    assert [s["sum"] for s in written] == [102.0, 105.0, 109.0]
+    assert total == 109.0
+
+
+async def test_import_series_overlap_without_anchor_starts_from_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Overlap at the very beginning of a series (no row before the window).
+    base = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    written = _patch_import(monkeypatch, {"start": base, "sum": 24.0}, anchor=None)
+    total = await _async_import_series(
+        None, "enova_power:x", "x", [(base, 1.0), (base.replace(hour=6), 2.0)], "kWh"
+    )
+    assert [s["sum"] for s in written] == [1.0, 3.0]
+    assert total == 3.0
 
 
 async def test_import_series_none_when_series_empty(
@@ -477,6 +512,8 @@ async def test_import_series_metadata_uses_mean_type(
     assert captured["mean_type"] == StatisticMeanType.NONE
     assert "has_mean" not in captured
     assert captured["has_sum"] is True
+    # unit_class must be stated explicitly (required from HA 2026.11).
+    assert captured["unit_class"] == "energy"
 
 
 async def test_import_meter_writes_bucket_costs(

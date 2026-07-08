@@ -90,3 +90,42 @@ async def test_incremental_day_lands_hourly_after_rebuild(
     bucket_rows = await _hourly_rows(hass, bucket_statistic_id(METER, "tou_off_peak"))
     day2_start = datetime(2026, 7, 2, 4, tzinfo=timezone.utc).timestamp()  # 00:00 EDT
     assert sum(1 for r in bucket_rows if r["start"] >= day2_start) == 12  # off-peak hours
+
+
+async def test_preliminary_day_revision_heals(recorder_mock, hass: HomeAssistant) -> None:
+    """The reported v0.5.8 bug: a day first publishes as a preliminary row with
+    the whole total in the midnight slot and explicit zeros elsewhere, then is
+    revised to real hourly values a day later. The revision must overwrite the
+    preliminary rows — not be silently discarded, leaving the day's entire
+    energy lumped in the 12am-1am bucket forever."""
+    day1, day2 = date(2026, 7, 1), date(2026, 7, 2)
+
+    # Cycle 1: day 1 complete; day 2 first sighting — 24 kWh in h01, zeros after.
+    preliminary = _reading(
+        day2, **{**{f"h{i:02d}": 0.0 for i in range(1, 25)}, "h01": 24.0}
+    )
+    await async_import_meter(
+        hass, METER, [_full_day(day1), preliminary], PLAN_TOU, TOU_RATES, None, [], "CAD"
+    )
+    await async_wait_recording_done(hass)
+
+    # Cycle 2 (next day): the portal has revised day 2 into real hourly values.
+    await async_import_meter(
+        hass, METER, [_full_day(day1), _full_day(day2)], PLAN_TOU, TOU_RATES, None, [], "CAD"
+    )
+    await async_wait_recording_done(hass)
+
+    rows = await _hourly_rows(hass, consumption_statistic_id(METER))
+    assert len(rows) == 48
+    # Continuous +1 kWh per hour across both days: the 24-kWh midnight lump is
+    # gone and day 2's energy sits in its real hours.
+    assert [r["sum"] for r in rows] == [float(i) for i in range(1, 49)]
+
+    # The off-peak bucket healed too (the lump was classified off-peak).
+    # July 1 is Canada Day — off-peak all 24 hours; July 2 (Thu) has 12.
+    bucket_rows = await _hourly_rows(hass, bucket_statistic_id(METER, "tou_off_peak"))
+    assert bucket_rows[-1]["sum"] == 36.0
+    # Day 2's midnight row carries one real hour, not the 24-kWh lump.
+    day2_midnight = datetime(2026, 7, 2, 4, tzinfo=timezone.utc).timestamp()
+    (midnight_row,) = [r for r in bucket_rows if r["start"] == day2_midnight]
+    assert midnight_row["sum"] == 25.0  # 24 holiday hours + 1

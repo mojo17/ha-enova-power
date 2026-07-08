@@ -109,8 +109,10 @@ Semantics worth knowing:
   and tax. The actual all-in amount is the *Last bill amount* sensor. The portal only
   publishes *current* rates, so costs apply today's rates and threshold to all history — an
   approximation that self-corrects going forward as rates change.
-- Imports are forward-only cumulative sums: re-imports are idempotent, and history survives
-  restarts and re-installs.
+- Imports maintain cumulative sums and rewrite the downloaded window in place: the portal
+  first publishes a day as a preliminary total-in-the-first-hour row and revises it to real
+  hourly values a day later, and the re-import picks those revisions up. Re-imports are
+  idempotent, and history older than the window survives restarts and re-installs untouched.
 
 ## Energy dashboard
 
