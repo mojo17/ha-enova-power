@@ -1,6 +1,6 @@
 # Enova Power for Home Assistant
 
-[![hacs](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
+[![Home Assistant Marketplace](https://img.shields.io/badge/Marketplace-Default-41BDF5.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mojo17&repository=ha-enova-power&category=integration)
 
 > **⚠️ Unofficial project — not affiliated with, endorsed by, or supported by Enova Power Corp.** "Enova Power" is a trademark of its respective owner. Use at your own risk under the Apache-2.0 license.
 
@@ -21,16 +21,18 @@ account gets its own device and statistics series.
 
 ## Installation
 
-Requires Home Assistant 2026.10 or later and [HACS](https://hacs.xyz). The integration is awaiting review for the
-HACS default store; until then it installs as a custom repository — one extra
-click, same result, including automatic updates.
+Requires Home Assistant 2026.10 or later. Enova Power is in the default
+catalog of the **Home Assistant Marketplace** — the community store that was
+HACS, built into Home Assistant since 2026.11. On Home Assistant 2026.10, use
+[HACS](https://hacs.xyz) instead: same catalog, same steps.
 
-[![Open your Home Assistant instance and show the add custom repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mojo17&repository=ha-enova-power&category=integration)
+[![Open your Home Assistant instance and open a repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mojo17&repository=ha-enova-power&category=integration)
 
-1. Click the badge above — or, in HACS, open **⋮ → Custom repositories** and add
-   `https://github.com/mojo17/ha-enova-power` with type **Integration**.
-2. Press **Download** on the Enova Power page that opens, then restart
-   Home Assistant.
+1. Click the badge above (it opens the Marketplace, or HACS on 2026.10) — or
+   open **Settings → Marketplace** (**HACS** in the sidebar on 2026.10) and
+   search for **Enova Power**.
+2. Install it from the Enova Power page, then restart Home Assistant if
+   prompted.
 3. Set up the integration and sign in with your Enova Power My Account
    credentials:
 
@@ -39,12 +41,12 @@ click, same result, including automatic updates.
    (or **Settings → Devices & Services → Add integration → Enova Power**).
 
 <details>
-<summary>Manual installation (without HACS)</summary>
+<summary>Manual installation (without the Marketplace)</summary>
 
 Download the latest [release](https://github.com/mojo17/ha-enova-power/releases/latest)
 source archive, copy `custom_components/enova_power/` into your Home Assistant
 `config/custom_components/` directory, and restart Home Assistant. You won't
-get update notifications this way — HACS is recommended.
+get update notifications this way — the Marketplace is recommended.
 
 </details>
 
