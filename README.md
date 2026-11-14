@@ -21,7 +21,7 @@ account gets its own device and statistics series.
 
 ## Installation
 
-Requires [HACS](https://hacs.xyz). The integration is awaiting review for the
+Requires Home Assistant 2026.10 or later and [HACS](https://hacs.xyz). The integration is awaiting review for the
 HACS default store; until then it installs as a custom repository — one extra
 click, same result, including automatic updates.
 
