@@ -1,0 +1,94 @@
+name: Dependency audit
+
+# Daily scan for known vulnerabilities and outdated pins / GitHub Actions
+# (see .github/scripts/dependency_report.py). Findings are kept in a single
+# open issue labelled `dependency-audit`, assigned to the repo owner so
+# GitHub emails them. The issue is updated (with a notifying comment) only
+# when the findings change, and closed when they clear. A failed run means the
+# audit itself broke, not that it found something.
+#
+# Dependabot version-update PRs aren't used: the Gitea→GitHub push mirror
+# prunes branches that only exist on GitHub, closing those PRs within the
+# hour.
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - custom_components/enova_power/manifest.json
+      - requirements_test.txt
+      - .github/workflows/**
+      - .github/scripts/dependency_report.py
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dependency-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    # Uses the GitHub API (issues, action releases); gate to GitHub so the
+    # Gitea mirror doesn't fail it (same as validate.yml).
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install pip-audit
+        run: |
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/python" -m pip install --upgrade pip pip-audit
+      - name: Scan
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Audit only what users install (the manifest requirements). The test
+          # requirements pull in all of Home Assistant, whose pins aren't ours
+          # to fix, so they're only checked for outdated pins.
+          jq -r '.requirements[]' custom_components/enova_power/manifest.json \
+            > "$RUNNER_TEMP/runtime.txt"
+          "$RUNNER_TEMP/audit/bin/python" .github/scripts/dependency_report.py \
+            --runtime "$RUNNER_TEMP/runtime.txt" \
+            --extra requirements_test.txt \
+            --out "$RUNNER_TEMP/report.md"
+      - name: Update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COUNT: ${{ steps.scan.outputs.count }}
+          FINGERPRINT: ${{ steps.scan.outputs.fingerprint }}
+          TITLE: ${{ steps.scan.outputs.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          label=dependency-audit
+          gh label create "$label" --color B60205 \
+            --description "Opened by the dependency audit workflow" 2>/dev/null || true
+          issue=$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')
+          report="$RUNNER_TEMP/report.md"
+          printf '\n---\n_Last changed by [this run](%s) on %s._\n' "$RUN_URL" "$(date -u +%F)" >> "$report"
+
+          if [ "$COUNT" -gt 0 ]; then
+            if [ -z "$issue" ]; then
+              gh issue create --title "$TITLE" --label "$label" \
+                --assignee "$GITHUB_REPOSITORY_OWNER" --body-file "$report"
+            elif ! gh issue view "$issue" --json body --jq .body | grep -qF "fingerprint: $FINGERPRINT"; then
+              gh issue edit "$issue" --title "$TITLE" --body-file "$report"
+              gh issue comment "$issue" --body "Findings changed: now **${TITLE#Dependency audit: }**. See the updated description. ([run]($RUN_URL))"
+            else
+              echo "Findings unchanged since issue #$issue; nothing to do."
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "All clear: no known vulnerabilities or outdated dependencies. ([run]($RUN_URL))"
+            gh issue close "$issue" --reason completed
+          else
+            echo "Clean; no open issue."
+          fi
