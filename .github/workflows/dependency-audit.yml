@@ -24,6 +24,7 @@ on:
       - .github/scripts/dependency_report.py
 
 permissions:
+  actions: write  # keep-alive step below
   contents: read
   issues: write
 
@@ -92,3 +93,18 @@ jobs:
           else
             echo "Clean; no open issue."
           fi
+      - name: Keep scheduled workflows enabled
+        # GitHub disables scheduled workflows in public repos after 60 days
+        # without repository activity (it did to ha-enova-power's validate.yml
+        # in Sep 2026), which would silence this audit exactly when nothing
+        # else is happening. Re-enabling resets the timer; workflows disabled
+        # by hand are left alone.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.path | startswith(".github/workflows/"))
+                  | select(.state != "disabled_manually") | .id' |
+          while read -r id; do
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/enable"
+          done
