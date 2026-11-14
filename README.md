@@ -21,32 +21,67 @@ account gets its own device and statistics series.
 
 ## Installation
 
-Requires Home Assistant 2026.10 or later. Enova Power is in the default
-catalog of the **Home Assistant Marketplace** — the community store that was
-HACS, built into Home Assistant since 2026.11. On Home Assistant 2026.10, use
-[HACS](https://hacs.xyz) instead: same catalog, same steps.
+Requires Home Assistant **2026.10 or later**. Where you install from depends on
+your version (check **Settings → About**):
+
+| Your Home Assistant | Install from |
+| --- | --- |
+| **2026.11 or later** | [Home Assistant Marketplace](#home-assistant-202611-and-later-marketplace), built in |
+| **2026.10** | [HACS](#home-assistant-202610-hacs), installed separately |
+| Older | [Upgrade Home Assistant first](#older-home-assistant-versions) |
+
+Both list the same catalog, and both notify you when an update is out.
+
+### Home Assistant 2026.11 and later: Marketplace
+
+The Marketplace is the community store that used to be HACS. It has been built
+into Home Assistant since 2026.11, so there's nothing extra to install.
 
 [![Open your Home Assistant instance and open a repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mojo17&repository=ha-enova-power&category=integration)
 
-1. Click the badge above (it opens the Marketplace, or HACS on 2026.10) — or
-   open **Settings → Marketplace** (**HACS** in the sidebar on 2026.10) and
-   search for **Enova Power**.
+1. Click the badge above, or go to **Settings → Marketplace** and search for
+   **Enova Power**.
 2. Install it from the Enova Power page, then restart Home Assistant if
    prompted.
-3. Set up the integration and sign in with your Enova Power My Account
-   credentials:
+3. [Set up the integration](#set-up-the-integration).
 
-   [![Open your Home Assistant instance and start setting up this integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=enova_power)
+### Home Assistant 2026.10: HACS
 
-   (or **Settings → Devices & Services → Add integration → Enova Power**).
+2026.10 doesn't have the Marketplace yet, so you'll need
+[HACS](https://hacs.xyz/docs/use/). Enova Power is in its default catalog.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mojo17&repository=ha-enova-power&category=integration)
+
+1. Click the badge above, or open **HACS** in the sidebar and search for
+   **Enova Power**.
+2. Press **Download** on the Enova Power page, then restart Home Assistant.
+3. [Set up the integration](#set-up-the-integration).
+
+### Set up the integration
+
+Add the integration and sign in with your Enova Power My Account credentials:
+
+[![Open your Home Assistant instance and start setting up this integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=enova_power)
+
+You can also go to **Settings → Devices & Services → Add integration → Enova Power**.
+The first setup backfills about 12 months of history, so the Energy dashboard can
+take a few minutes to fill in.
+
+### Older Home Assistant versions
+
+Since 0.5.12 this integration requires Home Assistant 2026.10. Home Assistant
+bundles its own `aiohttp`, and 2026.10 is the first release whose version is
+patched against the published security advisories. If you're on an older
+version, HACS keeps you on 0.5.11, which doesn't have the fix. Update Home
+Assistant to get 0.5.12 and later.
 
 <details>
-<summary>Manual installation (without the Marketplace)</summary>
+<summary>Manual installation (no Marketplace or HACS)</summary>
 
 Download the latest [release](https://github.com/mojo17/ha-enova-power/releases/latest)
 source archive, copy `custom_components/enova_power/` into your Home Assistant
 `config/custom_components/` directory, and restart Home Assistant. You won't
-get update notifications this way — the Marketplace is recommended.
+get update notifications this way, so the Marketplace or HACS is recommended.
 
 </details>
 
