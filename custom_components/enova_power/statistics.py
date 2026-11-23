@@ -84,6 +84,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
+from homeassistant.util import slugify
 
 from .const import (
     DOMAIN,
@@ -104,29 +105,37 @@ from .schedule import period_for_interval
 # --------------------------------------------------------------------------- #
 
 
+def _meter_slug(meter_id: str) -> str:
+    """Normalize a meter ID for HA external statistic_ids (lowercase [a-z0-9_])."""
+    slug = slugify(meter_id)
+    if not slug:
+        raise ValueError(f"Invalid meter_id for statistic_id: {meter_id!r}")
+    return slug
+
+
 def consumption_statistic_id(meter_id: str) -> str:
     """External statistic_id for a meter's total consumption (kWh)."""
-    return f"{DOMAIN}:energy_consumption_{meter_id}"
+    return f"{DOMAIN}:energy_consumption_{_meter_slug(meter_id)}"
 
 
 def bucket_statistic_id(meter_id: str, key: str) -> str:
     """External statistic_id for a usage bucket (e.g. ``tou_on_peak``, ``tier1``)."""
-    return f"{DOMAIN}:energy_{key}_{meter_id}"
+    return f"{DOMAIN}:energy_{key}_{_meter_slug(meter_id)}"
 
 
 def bucket_cost_statistic_id(meter_id: str, key: str) -> str:
     """External statistic_id for a usage bucket's energy cost (CAD)."""
-    return f"{DOMAIN}:cost_{key}_{meter_id}"
+    return f"{DOMAIN}:cost_{key}_{_meter_slug(meter_id)}"
 
 
 def cost_statistic_id(meter_id: str) -> str:
     """External statistic_id for a meter's active-plan energy cost (CAD)."""
-    return f"{DOMAIN}:energy_cost_{meter_id}"
+    return f"{DOMAIN}:energy_cost_{_meter_slug(meter_id)}"
 
 
 def cost_if_statistic_id(meter_id: str, plan: str) -> str:
     """External statistic_id for a what-if energy cost under ``plan`` (CAD)."""
-    return f"{DOMAIN}:cost_if_{_SCHEME[plan]}_{meter_id}"
+    return f"{DOMAIN}:cost_if_{_SCHEME[plan]}_{_meter_slug(meter_id)}"
 
 
 # Short scheme tag per plan, used in statistic ids.
