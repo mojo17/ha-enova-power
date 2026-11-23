@@ -452,3 +452,46 @@ async def test_DW_3_1_v4_upgrade_repairs_in_place_with_one_download(
     tier2 = await _hourly_rows(hass, bucket_statistic_id(METER, "tier2"))
     sums = [r["sum"] for r in tier2]
     assert sums == sorted(sums)  # no oscillation / stale plateaus left behind
+
+
+async def test_alphanumeric_uppercase_meter_id_imports_cleanly(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """Alphanumeric uppercase meter IDs (e.g. KWH123456) must produce valid
+    lowercase external statistic_ids accepted by the Home Assistant recorder."""
+    meter_id = "KWH123456"
+    day = date(2026, 7, 1)
+    readings = [_full_day(day, 1.0)]
+
+    assert consumption_statistic_id(meter_id) == f"{DOMAIN}:energy_consumption_kwh123456"
+    assert (
+        bucket_statistic_id(meter_id, "tou_on_peak")
+        == f"{DOMAIN}:energy_tou_on_peak_kwh123456"
+    )
+    assert (
+        bucket_cost_statistic_id(meter_id, "tou_on_peak")
+        == f"{DOMAIN}:cost_tou_on_peak_kwh123456"
+    )
+    assert cost_statistic_id(meter_id) == f"{DOMAIN}:energy_cost_kwh123456"
+    assert cost_if_statistic_id(meter_id, PLAN_TOU) == f"{DOMAIN}:cost_if_tou_kwh123456"
+
+    with pytest.raises(ValueError, match="Invalid meter_id"):
+        consumption_statistic_id("")
+
+    await async_import_meter(
+        hass,
+        meter_id,
+        readings,
+        PLAN_TOU,
+        TOU_RATES,
+        None,
+        [],
+        "CAD",
+        window=download_window(day, day),
+        covered_days=days_covered(readings),
+    )
+    await async_wait_recording_done(hass)
+
+    rows = await _hourly_rows(hass, consumption_statistic_id(meter_id))
+    assert len(rows) == 24
+    assert rows[-1]["sum"] == 24.0
